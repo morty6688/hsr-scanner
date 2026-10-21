@@ -1,14 +1,41 @@
 import json
+from decimal import Decimal, InvalidOperation
 from typing import Union, List
 
 from loguru import logger
-from rapidfuzz import process
 
 from app.constant import RELIC_INNER_PARTS, RELIC_OUTER_PARTS, RELIC_STATS_MAPPING
 from app.core.custom_exception import RelicMatchNotFoundException
 from app.core.data_models.model_io import RelicMatcherInput, RelicMatcherInputType
 from app.core.data_models.relic_info import RelicTitle, RelicMainStat, RelicSubStat
 from app.core.interfaces.model_interface import ModelInterface
+
+
+def exact_match(text, values):
+    key = ''.join(text.split())
+    matches = [v for v in values if ''.join(v.split()) == key]
+    return (matches[0], 100) if len(matches) == 1 else None
+
+
+def numeric_match(text, values):
+    def normalize(value):
+        value = value.replace(',', '').replace('，', '').replace('％', '%').strip()
+        return Decimal(value.rstrip('%')), value.endswith('%')
+    try:
+        target = normalize(text)
+        matches = [v for v in values if normalize(v) == target]
+    except InvalidOperation:
+        return None
+    return (matches[0], 100) if len(matches) == 1 else None
+
+
+def stat_key(text):
+    aliases = {v: k for k, v in RELIC_STATS_MAPPING.items()}
+    aliases.update({'生命值': 'HP', '攻击力': 'ATK', '防御力': 'DEF',
+        '能量恢复效率': 'EnergyRegenerationRate',
+        '生命值Percentage': 'HPPercentage', '攻击力Percentage': 'ATKPercentage',
+        '防御力Percentage': 'DEFPercentage'})
+    return aliases.get(text, text)
 
 
 class RelicMatcherModel(ModelInterface[RelicMatcherInput, Union[RelicTitle, RelicMainStat, List[RelicSubStat]]]):
@@ -40,7 +67,10 @@ class RelicMatcherModel(ModelInterface[RelicMatcherInput, Union[RelicTitle, Reli
                             'set_name': relic_set_name,
                             'part': part
                         }
+                        part_model['id'] = details.get('part_ids', {}).get(part)
                         self.relic_parts[details['parts'][part]] = part_model
+                        if part in details.get('parts_cn', {}):
+                            self.relic_parts[details['parts_cn'][part]] = part_model
 
         except Exception as e:
             logger.error(f"读取遗器数据失败: {e}")
@@ -74,29 +104,30 @@ class RelicMatcherModel(ModelInterface[RelicMatcherInput, Union[RelicTitle, Reli
         raise ValueError(f"未知的输入类型: {input_data.type}")
 
     def match_relic_part(self, relic_title: str) -> RelicTitle:
-        fuzz_result = process.extractOne(relic_title, self.relic_parts.keys())
+        fuzz_result = exact_match(relic_title, self.relic_parts)
         if fuzz_result is None or fuzz_result[1] < 50:
-            error = f"模糊匹配无法匹配遗器标题: {relic_title}, 匹配结果: {fuzz_result}"
+            error = f"无法精确匹配遗器标题: {relic_title}, 匹配结果: {fuzz_result}"
             raise RelicMatchNotFoundException(error)
 
         relic_title = fuzz_result[0]
 
-        matching_result = RelicTitle(title=relic_title, set_name=self.relic_parts[relic_title]['set_name'],
+        matching_result = RelicTitle(id=self.relic_parts[relic_title].get("id"), title=next(k for k, v in self.relic_parts.items() if v == self.relic_parts[relic_title]), set_name=self.relic_parts[relic_title]['set_name'],
                                      part=self.relic_parts[relic_title]['part'])
 
         return matching_result
 
     def match_relic_main_stat(self, relic_main_stat: str, relic_main_stat_val: str) -> RelicMainStat:
-        fuzz_main_stat_result = process.extractOne(relic_main_stat, self.relic_main_stats.keys())
+        relic_main_stat = stat_key(relic_main_stat)
+        fuzz_main_stat_result = exact_match(relic_main_stat, self.relic_main_stats)
         if fuzz_main_stat_result is None or fuzz_main_stat_result[1] < 50:
-            error = f"模糊匹配无法匹配遗器主属性: {relic_main_stat}, 匹配结果: {fuzz_main_stat_result}"
+            error = f"无法精确匹配遗器主属性: {relic_main_stat}, 匹配结果: {fuzz_main_stat_result}"
             raise RelicMatchNotFoundException(error)
 
         main_stat_level_map = self.relic_main_stats[fuzz_main_stat_result[0]]
-        # fuzz match the relic main stat value
-        fuzz_main_stat_val_result = process.extractOne(relic_main_stat_val, main_stat_level_map.keys())
+        # Values must match a valid numerical value, never fuzzy-correct digits.
+        fuzz_main_stat_val_result = numeric_match(relic_main_stat_val, main_stat_level_map)
         if fuzz_main_stat_val_result is None or fuzz_main_stat_val_result[1] < 50:
-            error = f"模糊匹配无法匹配遗器主属性值: {relic_main_stat_val}, 匹配结果: {fuzz_main_stat_val_result}"
+            error = f"无法精确匹配遗器主属性值: {relic_main_stat_val}, 匹配结果: {fuzz_main_stat_val_result}"
             raise RelicMatchNotFoundException(error)
 
         # calculate the level and enhance level
@@ -116,15 +147,15 @@ class RelicMatcherModel(ModelInterface[RelicMatcherInput, Union[RelicTitle, Reli
 
         # fuzz match the relic sub stats name and value
         for key, value in relic_sub_stats.items():
-            fuzz_sub_stat_result = process.extractOne(key, self.relic_sub_stats.keys())
+            fuzz_sub_stat_result = exact_match(stat_key(key), self.relic_sub_stats)
             if fuzz_sub_stat_result is None or fuzz_sub_stat_result[1] < 50:
-                error = f"模糊匹配无法匹配遗器副属性: {key}, 匹配结果: {fuzz_sub_stat_result}"
+                error = f"无法精确匹配遗器副属性: {key}, 匹配结果: {fuzz_sub_stat_result}"
                 raise RelicMatchNotFoundException(error)
 
             sub_stat_score_map = self.relic_sub_stats[fuzz_sub_stat_result[0]]
-            fuzz_sub_stat_val_result = process.extractOne(value, sub_stat_score_map.keys())
+            fuzz_sub_stat_val_result = numeric_match(value, sub_stat_score_map)
             if fuzz_sub_stat_val_result is None or fuzz_sub_stat_val_result[1] < 50:
-                error = f"模糊匹配无法匹配遗器副属性值: {value}, 匹配结果: {fuzz_sub_stat_val_result}"
+                error = f"无法精确匹配遗器副属性值: {value}, 匹配结果: {fuzz_sub_stat_val_result}"
                 raise RelicMatchNotFoundException(error)
 
             scores = sub_stat_score_map[fuzz_sub_stat_val_result[0]]

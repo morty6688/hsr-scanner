@@ -11,6 +11,8 @@ export type ImageDisplayProps = {
 export default function ImageDisplay({ filePath, width = 100, height = 100, className }: ImageDisplayProps) {
     const { data: imgSrc, error, isLoading } = useImage(filePath)
 
+    if (!filePath) return <span style={{ width, height }} className={className} aria-label="无本地图标">◇</span>
+
     if (error) {
         console.error('Failed to fetch image:', error)
         return null

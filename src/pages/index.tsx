@@ -1,326 +1,91 @@
-import { Button } from '@/components/ui/button.tsx'
-import SwitchWithLabel from '@/components/switch-with-label.tsx'
-import React, { useEffect, useMemo, useState } from 'react'
-import { PipelineType, useBackend } from '@/hooks/use-backend.ts'
-import { io, Socket } from 'socket.io-client'
-import useRelic from '@/hooks/use-relic.ts'
-import { toast } from 'sonner'
-import { Separator } from '@/components/ui/separator.tsx'
-import { Badge } from '@/components/ui/badge.tsx'
-import { useModal } from '@/hooks/use-modal.ts'
-import ImageDisplay from '@/components/image-display.tsx'
-import { useJsonFile } from '@/apis/files'
+import { useEffect, useState } from 'react'
 import axios from 'axios'
-import { getBackendUrl } from '@/lib/utils.ts'
-import { useRelicTemplateList } from '@/apis/relic-template'
-import { invoke } from '@tauri-apps/api/core'
-import { useCheckAssetUpdate } from '@/hooks/use-check-asset-update.ts'
-import { useCheckAppUpdate } from '@/hooks/use-check-app-update.ts'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { useBackend } from '@/hooks/use-backend'
+import { useModal } from '@/hooks/use-modal'
+import { getBackendUrl } from '@/lib/utils'
+import { toast } from 'sonner'
+import { useJsonFile } from '@/apis/files'
 
-const SCORE_THRESHOLDS = {
-    VERY_LOW: 20,
-    LOW: 40,
-    MEDIUM: 60,
-    HIGH: 80,
+type Score = { current_confirmed: boolean; score: number; potential: number; characters: string[] }
+type RecordItem = {
+    id: string; screenshot: string; ambiguous: boolean; execution: string
+    relic: { relic_title?: { title: string; set_name?: string; part?: string }; relic_main_stat?: { name: string; number: string; level: number };
+        relic_sub_stat?: { name: string; number: string; activation: string }[] }
+    assessment: { decision: 'keep' | 'discard' | 'review'; reasons: string[]; scores: Score[] }
 }
+type Session = { id: string; status: string; message: string; records: RecordItem[]; counts: Record<string, number> }
+const labels = { keep: '保留', discard: '建议弃置', review: '待确认' }
+const statuses: Record<string, string> = { scanning: '扫描中', preview: '待预览', executing: '标记中', finished: '已结束', pending: '未执行', success: '成功', skipped: '已跳过', failed: '失败', unverified: '待核验' }
 
-const SCORE_CONFIG = {
-    potential: {
-        [SCORE_THRESHOLDS.VERY_LOW]: { text: '建议分解', color: 'bg-black' },
-        [SCORE_THRESHOLDS.LOW]: { text: '不推荐强化', color: 'bg-gray-500' },
-        [SCORE_THRESHOLDS.MEDIUM]: { text: '可以强化', color: 'bg-green-500' },
-        [SCORE_THRESHOLDS.HIGH]: { text: '推荐强化', color: 'bg-yellow-500' },
-        max: { text: '必须强化', color: 'bg-red-500' },
-    },
-    actual: {
-        [SCORE_THRESHOLDS.VERY_LOW]: { text: 'C', color: 'bg-black' },
-        [SCORE_THRESHOLDS.LOW]: { text: 'B', color: 'bg-gray-500' },
-        [SCORE_THRESHOLDS.MEDIUM]: { text: 'A', color: 'bg-green-500' },
-        [SCORE_THRESHOLDS.HIGH]: { text: 'S', color: 'bg-yellow-500' },
-        max: { text: 'ACE', color: 'bg-red-500' },
-    },
-}
-
-const Home = () => {
-    const [socketIoClient, setSocketIoClient] = useState<Socket | null>(null)
-    const [windowOnTop, setWindowOnTop] = useState(false)
-    const [minimized, setMinimized] = useState(false)
-    const [showLogWindow, setShowLogWindow] = useState(false)
-
-    const backendStore = useBackend()
-    const relicStore = useRelic()
-    const modelStore = useModal()
-    const relicTemplateList = useRelicTemplateList()
+export default function Home() {
+    const { backendPort } = useBackend()
+    const { onOpen } = useModal()
     const relicSets = useJsonFile('relic/relic_sets.json')
-    const characters = useJsonFile('character/character_meta.json')
-
-    useCheckAssetUpdate()
-    useCheckAppUpdate()
-
+    const titleFor = (title: RecordItem['relic']['relic_title']) => {
+        if (!title) return '未知遗器'
+        return relicSets.data?.[title.set_name ?? '']?.parts_cn?.[title.part ?? ''] ?? title.title
+    }
+    const [session, setSession] = useState<Session | null>(null)
+    const [threshold, setThreshold] = useState('')
+    const [selected, setSelected] = useState<string[]>([])
+    const [pending, setPending] = useState(false)
+    const base = backendPort ? getBackendUrl(backendPort) : ''
+    const busy = pending || session?.status === 'scanning' || session?.status === 'executing'
     useEffect(() => {
-        if (!backendStore.backendPort) {
-            return
-        }
-
-        relicSets.refetch()
-        characters.refetch()
-        relicTemplateList.refetch()
-        // init the used template for once
-        axios.get(`${getBackendUrl(backendStore.backendPort)}/rating-template/init`)
-
-        const socketClient = io(`http://localhost:${backendStore.backendPort}`)
-
-        socketClient.on('pipeline_result', (data) => {
-            if (data.stage === 'ocr_stage') {
-                const relicData = data.data
-                console.log(relicData)
-                relicStore.setRelicInfo(relicData)
-            } else if (data.stage === 'relic_analysis_stage') {
-                const relicScores = data.data
-                console.log(relicScores)
-                relicStore.setRelicScores(relicScores)
-            }
-        })
-
-        socketClient.on('pipeline_error', (data) => {
-            toast.error(data.error)
-        })
-
-        socketClient.on('pipeline_started', (data) => {
-            backendStore.setPipelineId(data.pipeline_id)
-            if (data.pipeline_type === 'SingleRelicAnalysisPipeline') {
-                backendStore.setPipelineType('SingleRelicAnalysisPipeline')
-            } else if (data.pipeline_type === 'AutoRelicAnalysisPipeline') {
-                backendStore.setPipelineType('AutoRelicAnalysisPipeline')
-            }
-        })
-
-        socketClient.on('pipeline_stopped', (_) => {
-            backendStore.setPipelineId()
-            backendStore.setPipelineType()
-        })
-
-        setSocketIoClient(socketClient)
-    }, [backendStore.backendPort])
-
-    const ScoreChip = React.memo(({ score, type }: { score: number; type: 'potential' | 'actual' }) => {
-        const scorePercentage = score * 100
-        const config = SCORE_CONFIG[type]
-
-        const { text, color } = useMemo(() => {
-            if (scorePercentage < SCORE_THRESHOLDS.VERY_LOW) return config[SCORE_THRESHOLDS.VERY_LOW]
-            if (scorePercentage < SCORE_THRESHOLDS.LOW) return config[SCORE_THRESHOLDS.LOW]
-            if (scorePercentage < SCORE_THRESHOLDS.MEDIUM) return config[SCORE_THRESHOLDS.MEDIUM]
-            if (scorePercentage < SCORE_THRESHOLDS.HIGH) return config[SCORE_THRESHOLDS.HIGH]
-            return config.max
-        }, [scorePercentage, config])
-
-        return (
-            <Badge className={color}>
-                <span className="flex gap-2 items-center">
-                    <span className="font-black">{text}</span>
-                    <span className="font-black">{scorePercentage.toFixed(2)}</span>
-                </span>
-            </Badge>
-        )
-    })
-
-    ScoreChip.displayName = 'ScoreChip'
-
-    const CharacterIcons = React.memo(
-        ({
-            characters,
-            characterMeta,
-        }: {
-            characters: string[]
-            characterMeta: Record<string, { name: string; icon: string }>
-        }) => (
-            <>
-                {characters.map((character, index) => (
-                    <div key={index}>
-                        <ImageDisplay
-                            filePath={characterMeta[character].icon}
-                            width={25}
-                            height={25}
-                            className="rounded-lg"
-                        />
-                    </div>
-                ))}
-            </>
-        )
-    )
-
-    CharacterIcons.displayName = 'CharacterIcons'
-
-    const handleStartPipeline = (type: PipelineType) => {
-        if (socketIoClient === null) {
-            toast.error('socket-io服务未启动, 请稍后再试')
-            return
-        }
-        if (type === 'SingleRelicAnalysisPipeline') {
-            socketIoClient.emit('start_pipeline', {
-                config_name: type,
-            })
-        } else if (type === 'AutoRelicAnalysisPipeline') {
-            socketIoClient.emit('start_pipeline', {
-                config_name: type,
-            })
-        }
-    }
-
-    const handleStopPipeline = () => {
-        if (socketIoClient === null) {
-            toast.error('socket-io服务未启动, 请稍后再试')
-            return
-        }
-
-        socketIoClient.emit('stop_pipeline', {})
-    }
-
-    const handleSelectTemplate = () => {
-        modelStore.onOpen('select-template')
-    }
-
-    const handleWindowOnTopChange = async (checked: boolean) => {
-        await invoke('set_window_on_top', { onTop: checked })
-        setWindowOnTop(checked)
-    }
-
-    const handleToggleLogWindow = async (checked: boolean) => {
+        if (!base) return
+        let alive = true
+        const poll = () => axios.get(`${base}/review`).then(({ data }) => { if (alive) setSession(data) }).catch(() => {})
+        axios.get(`${base}/rating-template/init`).catch(() => toast.error('模板初始化失败'))
+        poll()
+        const timer = setInterval(poll, 1000)
+        return () => { alive = false; clearInterval(timer) }
+    }, [base])
+    const action = async (name: string, data = {}) => {
+        setPending(true)
         try {
-            await invoke('toggle_log_window', { show: checked })
-            setShowLogWindow(checked)
-        } catch (e) {
-            toast.error(`切换日志窗口时出现错误 ${e}`)
-        }
+            const response = await axios.post(`${base}/review/${name}`, data)
+            if (name !== 'stop') setSession(response.data)
+            setSelected([])
+        } catch (error) {
+            toast.error(axios.isAxiosError(error) ? String(error.response?.data?.detail ?? error.message) : String(error))
+        } finally { setPending(false) }
     }
-
-    const handleMinimizeChange = async (checked: boolean) => {
-        if (checked) {
-            await invoke('set_window_size', { width: 600, height: 350 })
-        } else {
-            await invoke('set_window_size', { width: 800, height: 600 })
-        }
-        setMinimized(checked)
-    }
-
-    return (
-        <div className="flex flex-col">
-            <div className="flex my-10 mx-4 justify-around gap-2 ">
-                <div className="flex gap-4 flex-col">
-                    <SwitchWithLabel
-                        id="top"
-                        text="窗口置顶"
-                        checked={windowOnTop}
-                        onCheckedChange={handleWindowOnTopChange}
-                    />
-                    <SwitchWithLabel
-                        id="small"
-                        text="小屏模式"
-                        checked={minimized}
-                        onCheckedChange={handleMinimizeChange}
-                    />
-                    <SwitchWithLabel
-                        id="manual"
-                        text="手动扫描"
-                        disabled={
-                            socketIoClient === null ||
-                            (backendStore.pipelineType !== 'SingleRelicAnalysisPipeline' &&
-                                backendStore.pipelineType !== undefined)
-                        }
-                        onCheckedChange={(checked) => {
-                            if (checked) {
-                                handleStartPipeline('SingleRelicAnalysisPipeline')
-                            } else {
-                                handleStopPipeline()
-                            }
-                        }}
-                    />
-                    <SwitchWithLabel
-                        id="auto"
-                        text="自动扫描"
-                        disabled={
-                            socketIoClient === null ||
-                            (backendStore.pipelineType !== 'AutoRelicAnalysisPipeline' &&
-                                backendStore.pipelineType !== undefined)
-                        }
-                        onCheckedChange={(checked) => {
-                            if (checked) {
-                                handleStartPipeline('AutoRelicAnalysisPipeline')
-                            } else {
-                                handleStopPipeline()
-                            }
-                        }}
-                    />
-                    <SwitchWithLabel
-                        text={'日志窗口'}
-                        id={'log_window'}
-                        checked={showLogWindow}
-                        onCheckedChange={(checked) => handleToggleLogWindow(checked)}
-                    />
-                    {!minimized && (
-                        <>
-                            <Button onClick={handleSelectTemplate}>选择模板</Button>
-                        </>
-                    )}
-                </div>
-                {backendStore.pipelineId ? (
-                    <div className="flex flex-col gap-2">
-                        <div className="font-black text-indigo-700 text-center">
-                            {relicStore.relicInfo?.relic_title?.title}
-                        </div>
-
-                        <div className="flex items-center justify-center gap-2 font-semibold">
-                            {relicStore.relicInfo?.relic_main_stat ? (
-                                <>
-                                    {relicStore.relicInfo?.relic_main_stat?.name}:{' '}
-                                    {relicStore.relicInfo?.relic_main_stat?.number}
-                                    <Badge>{relicStore.relicInfo?.relic_main_stat?.level}级</Badge>
-                                </>
-                            ) : (
-                                <div className="text-red-600">未检测到主属性</div>
-                            )}
-                        </div>
-
-                        <Separator />
-
-                        <div className="flex flex-col gap-2">
-                            {relicStore.relicInfo?.relic_sub_stat?.map((subStat) => (
-                                <div
-                                    key={subStat.name}
-                                    className="flex items-center justify-center gap-2 font-semibold"
-                                >
-                                    {subStat.name}: {subStat.number}
-                                    <Badge>
-                                        {subStat.score.length > 1 ? subStat.score.join(' | ') : subStat.score[0]}
-                                    </Badge>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                ) : (
-                    <div className="font-semibold">选择模板后,开始扫描，显示遗器扫描内容</div>
-                )}
-                {/*TODO: rewrite this part*/}
-                {backendStore.pipelineId && relicStore.relicScores?.length === 0 && (
-                    <div className="font-semibold text-center">当前遗器无适用角色, 基于当前模板可以遗弃</div>
-                )}
-                {backendStore.pipelineId && relicStore.relicScores && relicStore.relicScores?.length > 0 && (
-                    <div className="flex flex-col gap-2 max-h-[280px] overflow-y-scroll pr-10">
-                        {relicStore?.relicScores?.map((score, index) => (
-                            <div key={index} className="flex items-center justify-center gap-2 font-semibold">
-                                <CharacterIcons characters={score.characters} characterMeta={characters.data} />
-                                <ScoreChip
-                                    score={score.score}
-                                    type={score.type === 'potential' ? 'potential' : 'actual'}
-                                />
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </div>
+    return <div className="p-5 flex flex-col gap-4">
+        <h1 className="text-xl font-bold">本地遗器清理</h1>
+        <p>当前适配每行 8 件：先滚动到列表顶部，选中第一行最左侧遗器。按蛇形逐行扫描，点击开始后有 3 秒切回游戏；Esc 随时停止。</p>
+        <div className="flex gap-2 flex-wrap">
+            <Button disabled={!base || busy} onClick={() => onOpen('select-template')}>选择模板</Button>
+            <Button disabled={!base || busy} onClick={() => action('scan')}>开始扫描（不标记）</Button>
+            <Button variant="destructive" disabled={!base} onClick={() => action('stop')}>停止 / 暂停</Button>
         </div>
-    )
+        <p>四条可见不等于四条生效。未校准生效、锁定、装备和弃置状态时，只生成待确认结果。</p>
+        <div className="flex gap-2 items-center">
+            <Input className="w-32" type="number" min="1" max="100" placeholder="保留阈值 %" value={threshold} onChange={e => setThreshold(e.target.value)} />
+            <Button disabled={busy || !session || !(Number(threshold) > 0 && Number(threshold) <= 100)} onClick={() => action('reprice', { threshold: Number(threshold) / 100 })}>按当前模板重新评分</Button>
+        </div>
+        <p>状态：{session ? statuses[session.status] ?? session.status : '尚未扫描'} · 已扫描 {session?.records.length ?? 0} 件</p>
+        {session?.message && <p role="status">{session.message}</p>}
+        {!!session && Object.keys(session.counts).length > 0 && <p>成功 {session.counts.success} / 跳过 {session.counts.skipped} / 失败 {session.counts.failed} / 未执行 {session.counts.unexecuted}</p>}
+        <p>执行前请滚动到顶部并选中第一行最左侧，保持每行 8 件、筛选和排序不变；逐件重新核验，不自动强化或分解。</p>
+        <Button disabled={busy || session?.status !== 'preview' || !selected.length} onClick={() => action('execute', { session_id: session!.id, selected })}>
+            确认标记所选 {selected.length} 件（3 秒后开始）
+        </Button>
+        {session?.records.map(record => <article key={record.id} className="border rounded p-3 flex gap-4">
+            <input aria-label={`选择遗器 ${Number(record.id) + 1}`} type="checkbox" checked={selected.includes(record.id)}
+                disabled={busy || record.ambiguous || record.execution !== 'pending' || record.assessment.decision !== 'discard'}
+                onChange={e => setSelected(ids => e.target.checked ? [...ids, record.id] : ids.filter(id => id !== record.id))} />
+            <a href={`${base}/review/image/${record.screenshot}`} target="_blank" rel="noreferrer"><img className="w-40" alt="扫描截图" src={`${base}/review/image/${record.screenshot}`} /></a>
+            <div className="flex flex-col gap-1">
+                <b>{titleFor(record.relic.relic_title)} · {labels[record.assessment.decision]}</b>
+                <span>{record.relic.relic_main_stat?.name} {record.relic.relic_main_stat?.number} · +{record.relic.relic_main_stat?.level}</span>
+                {record.relic.relic_sub_stat?.map(s => <span key={s.name}>{s.name} {s.number} · {{ active: '已生效', pending: '待解锁', unknown: '生效状态未知' }[s.activation] ?? '未知'}</span>)}
+                <span>{record.assessment.reasons.join('；')}</span>
+                {record.ambiguous && <span>重复内容，禁止自动标记</span>}
+                {record.assessment.scores.map((s, i) => <span key={i}>{s.characters.join(' / ')}：当前 {s.current_confirmed ? (s.score * 100).toFixed(1) : '待确认'}，潜力上界 {(s.potential * 100).toFixed(1)}</span>)}
+                <span>执行：{statuses[record.execution] ?? record.execution}</span>
+            </div>
+        </article>)}
+    </div>
 }
-
-export default Home

@@ -2,6 +2,9 @@ import base64
 import json
 import lzma
 from typing import Dict, List
+from pathlib import Path
+from app.constant import ASSETS_FOLDER
+from app.core.database import db
 
 import msgpack
 from loguru import logger
@@ -16,6 +19,8 @@ from app.core.orm_models.rating_template_orm import RatingTemplateORM
 # TODO: this can optimize by using a more efficient encoding method
 class TemplateEnDecoder:
     def __init__(self):
+        legacy = json.loads((Path(ASSETS_FOLDER) / 'legacy_template_keys.json').read_text(encoding='utf-8'))
+        self.legacy_mappings = {kind: {'backward': dict(enumerate(keys))} for kind, keys in legacy.items()}
         self.mappings = {
             'relic_set': self._load_mapping(RELIC_SETS_FILE),
             'character': self._load_mapping(CHARACTERS_FILE),
@@ -36,6 +41,8 @@ class TemplateEnDecoder:
 
     def encode(self, template: GetRatingTemplateResponse, rules: List[GetRatingRuleResponse]) -> str:
         result = {
+            'version': 2,
+            'keys': {kind: list(mapping['forward']) for kind, mapping in self.mappings.items()},
             'n': template.name,
             'd': template.description,
             'a': template.author,
@@ -63,6 +70,11 @@ class TemplateEnDecoder:
             decompressed = lzma.decompress(compressed)
             data = msgpack.unpackb(decompressed, raw=False)
 
+            version = data.get('version', 1)
+            if version not in (1, 2):
+                raise ValueError('不支持的模板格式版本')
+            mappings = self.legacy_mappings if version == 1 else {kind: {'backward': dict(enumerate(keys))} for kind, keys in data['keys'].items()}
+
             template = RatingTemplateORM(
                 name=data['n'],
                 description=data['d'],
@@ -70,22 +82,23 @@ class TemplateEnDecoder:
                 in_use=False
             )
 
-            template.save()
-            rules = [self._decode_rule(rule_data, template.id) for rule_data in data['r']]
-            RatingRuleORM.bulk_create(rules)
+            with db.atomic():
+                template.save()
+                rules = [self._decode_rule(rule_data, template.id, mappings) for rule_data in data['r']]
+                RatingRuleORM.bulk_create(rules)
 
         except Exception as e:
             logger.error(f"编码解析失败: {e}")
             raise e
 
-    def _decode_rule(self, rule_data: Dict, template_id: int) -> RatingRuleORM:
+    def _decode_rule(self, rule_data: Dict, template_id: int, mappings) -> RatingRuleORM:
         return RatingRuleORM(
             template_id=template_id,
-            set_names=[self.mappings['relic_set']['backward'][id] for id in rule_data['a']],
-            valuable_mains={k: [self.mappings['relic_main_stat']['backward'][id] for id in v] for k, v in
+            set_names=[mappings['relic_set']['backward'][id] for id in rule_data['a']],
+            valuable_mains={k: [mappings['relic_main_stat']['backward'][id] for id in v] for k, v in
                             rule_data['b'].items()},
             valuable_subs=[
-                {"name": self.mappings['relic_sub_stat']['backward'][sub[0]], "rating_scale": sub[1]} for
+                {"name": mappings['relic_sub_stat']['backward'][sub[0]], "rating_scale": sub[1]} for
                 sub in rule_data['c']],
-            fit_characters=[self.mappings['character']['backward'][id] for id in rule_data['d']]
+            fit_characters=[mappings['character']['backward'][id] for id in rule_data['d']]
         )

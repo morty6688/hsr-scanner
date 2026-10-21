@@ -13,12 +13,6 @@
       "class": "app.core.pipeline_stage_impls.relic_analysis_stage.RelicAnalysisStage"
     },
     {
-      "class": "app.core.pipeline_stage_impls.relic_discard_stage.RelicDiscardStage"
-    },
-    {
-      "class": "app.core.pipeline_stage_impls.relic_enhance_stage.RelicEnhanceStage"
-    },
-    {
       "class": "app.core.pipeline_stage_impls.single_complete_stage.SingleCompleteStage"
     },
     {

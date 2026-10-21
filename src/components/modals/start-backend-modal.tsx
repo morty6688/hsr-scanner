@@ -46,7 +46,7 @@ const StartBackendModal = () => {
                 }
             } catch (e) {
                 console.error('Error starting backend or setting up listeners:', e)
-                toast.error('启动后端服务时出错，请向作者反馈此问题')
+                toast.error('启动后端服务时出错，请检查本地依赖和模型文件，详见 README')
             }
         }
 

@@ -9,7 +9,6 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "process:default",
-    "updater:default"
+    "process:default"
   ]
 }

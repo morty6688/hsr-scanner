@@ -17,8 +17,9 @@ from app.core.model_impls.relic_matcher_model import RelicMatcherInput, RelicMat
 from app.core.network_models.responses.relic_ocr_response import RelicOCRResponse
 from app.core.pipeline_stage_impls.detection_stage import DetectionStage
 from app.core.pipeline_stage_impls.screenshot_stage import ScreenshotStage
+from app.core.substat_activation import clean_name, activation, merge_rows
 
-OCR_CONFIDENCE_THRESHOLD = 0.7
+OCR_CONFIDENCE_THRESHOLD = 0.95
 
 
 def pp_relic_stat_img(img: ndarray, split_ratio: float) -> tuple[ndarray, ndarray]:
@@ -46,10 +47,10 @@ def format_relic_title(ocr_result: List[Any]) -> Optional[str]:
     for result in ocr_result:
         title_part, confidence = result[1]
         if confidence < OCR_CONFIDENCE_THRESHOLD:
-            continue
+            return None
         relic_title += title_part
 
-    relic_title = re.sub(r"[^a-zA-Z- ']", "", relic_title)
+    relic_title = re.sub(r"[^a-zA-Z\u4e00-\u9fff- ']", "", relic_title)
 
     if len(relic_title) == 0:
         logger.error(f"无效遗器标题: {relic_title}")
@@ -89,10 +90,10 @@ def format_relic_main_stat(
         logger.error(f"OCR遗器主属性值置信度过低: {confidence}")
         return None
 
-    relic_main_stat_name = relic_main_stat_name.strip().replace(' ', '')
-    relic_main_stat_val = relic_main_stat_val.strip().replace(' ', '')
+    relic_main_stat_name = relic_main_stat_name.strip().replace(' ', '').replace('％', '%').replace(',', '').replace('，', '')
+    relic_main_stat_val = relic_main_stat_val.strip().replace(' ', '').replace('％', '%').replace(',', '').replace('，', '')
 
-    if relic_main_stat_name in ['HP', 'ATK', 'DEF'] and relic_main_stat_val.endswith('%'):
+    if relic_main_stat_name in ['HP', 'ATK', 'DEF', '生命值', '攻击力', '防御力'] and relic_main_stat_val.endswith('%'):
         relic_main_stat_name += 'Percentage'
 
     return {
@@ -112,6 +113,9 @@ def format_relic_sub_stat(
 
     min_result_count = 3
     max_result_count = 4
+
+    if len(relic_sub_stat_name_ocr_result) != len(relic_sub_stat_val_ocr_result):
+        return None
 
     if len(relic_sub_stat_name_ocr_result) < min_result_count:
         logger.error(f"遗器副属性数量低于最小值(3): {relic_sub_stat_name_ocr_result}")
@@ -133,15 +137,15 @@ def format_relic_sub_stat(
         if idx >= len(relic_sub_stat_val_ocr_result):
             logger.error(
                 f"副属性名称数量和值数量不匹配: {relic_sub_stat_name_ocr_result} {relic_sub_stat_val_ocr_result}")
-            continue
+            return None
 
         val, confidence = relic_sub_stat_val_ocr_result[idx][1]
         if confidence < OCR_CONFIDENCE_THRESHOLD:
             logger.error(f"OCR遗器副属性值置信度过低: {confidence}")
             return None
 
-        format_name = name.strip().replace(' ', '')
-        format_val = val.strip().replace(' ', '')
+        format_name = clean_name(name).replace('％', '%').replace(',', '').replace('，', '')
+        format_val = val.strip().replace(' ', '').replace('％', '%').replace(',', '').replace('，', '')
 
         try:
             # in the manually set sub stat area, this can also include the relic description, just ignore it
@@ -151,11 +155,13 @@ def format_relic_sub_stat(
                 int(format_val)
         except ValueError:
             logger.error(f"无效遗器副属性值: {format_val}")
-            continue
+            return None
 
-        if format_name in ['HP', 'ATK', 'DEF'] and format_val.endswith('%'):
+        if format_name in ['HP', 'ATK', 'DEF', '生命值', '攻击力', '防御力'] and format_val.endswith('%'):
             format_name += 'Percentage'
 
+        if format_name in format_result:
+            return None
         format_result[format_name] = format_val
 
     return format_result
@@ -172,6 +178,14 @@ class OCRStage(BasePipelineStage):
             auto_detect_relic_box_position = context.meta_data.get(AUTO_DETECT_RELIC_BOX, True)
             ocr_model = ModelManager().get_model(OCRModel)
             relic_matcher_model = ModelManager().get_model(RelicMatcherModel)
+            recognition_errors = []
+
+            def safe_match(value):
+                try:
+                    return relic_matcher_model.predict(value)
+                except Exception as error:
+                    recognition_errors.append(str(error))
+                    return None
 
             if auto_detect_relic_box_position:
                 detection_stage_result = context.get_stage_result(DetectionStage.get_name())
@@ -228,35 +242,51 @@ class OCRStage(BasePipelineStage):
                 relic_main_stat_image = self.crop_image(img_np, relic_main_stat_box)
                 relic_sub_stat_image = self.crop_image(img_np, relic_sub_stat_box)
 
+            ocr_model.trace = []
             relic_title = None
             relic_main_stat = None
             relic_sub_stat = None
 
             relic_title_info = self.handle_relic_title_ocr(ocr_model, relic_title_image)
             if relic_title_info:
-                relic_title = relic_matcher_model.predict(RelicMatcherInput(
+                relic_title = safe_match(RelicMatcherInput(
                     type=RelicMatcherInputType.RELIC_TITLE,
                     data=relic_title_info,
                 ))
 
             relic_main_stat_info = self.handle_relic_main_stat_ocr(ocr_model, relic_main_stat_image)
             if relic_main_stat_info:
-                relic_main_stat = relic_matcher_model.predict(RelicMatcherInput(
+                relic_main_stat = safe_match(RelicMatcherInput(
                     type=RelicMatcherInputType.RELIC_MAIN_STAT,
                     data=relic_main_stat_info,
                 ))
 
-            relic_sub_stat_info = self.handle_relic_sub_stat_ocr(ocr_model, relic_sub_stat_image)
+            relic_sub_stat_info, activations = self.handle_relic_sub_stat_ocr(ocr_model, relic_sub_stat_image)
+            if not relic_sub_stat_info and auto_detect_relic_box_position:
+                original = detection_stage_result['relic-sub-stat'].get('image_unpadded')
+                if original is not None:
+                    relic_sub_stat_info, activations = self.handle_relic_sub_stat_ocr(ocr_model, original)
             if relic_sub_stat_info:
-                relic_sub_stat = relic_matcher_model.predict(RelicMatcherInput(
+                relic_sub_stat = safe_match(RelicMatcherInput(
                     type=RelicMatcherInputType.RELIC_SUB_STAT,
                     data=relic_sub_stat_info,
                 ))
+                if relic_sub_stat and len(relic_sub_stat) == len(activations):
+                    for sub, state in zip(relic_sub_stat, activations):
+                        sub.activation = state
+
+            for label, value in [('遗器标题', relic_title), ('主属性', relic_main_stat), ('副属性', relic_sub_stat)]:
+                if value is None:
+                    recognition_errors.append(label + '识别失败：文字置信度不足、行数不匹配或无法精确匹配本地数据')
 
             relic_ocr_response = RelicOCRResponse(
                 relic_title=relic_title,
                 relic_main_stat=relic_main_stat,
-                relic_sub_stat=relic_sub_stat
+                relic_sub_stat=relic_sub_stat,
+                pending_unlock_cost=1 if relic_sub_stat and any(s.activation == 'pending' for s in relic_sub_stat) else None,
+                raw_ocr=ocr_model.trace,
+                recognition_errors=recognition_errors,
+                confidence=min((float(line[1][1]) for result in ocr_model.trace for page in (result or []) for line in (page or [])), default=0)
             )
 
             logger.debug(f"OCR data: {relic_ocr_response}")
@@ -296,4 +326,8 @@ class OCRStage(BasePipelineStage):
         stat_name_area, stat_val_area = pp_relic_stat_img(img, 0.7)
         name_result = ocr_model.predict(stat_name_area)
         val_result = ocr_model.predict(stat_val_area)
-        return format_relic_sub_stat(name_result, val_result)
+        name_result = merge_rows(name_result)
+        val_result = merge_rows(val_result)
+        lines = (name_result or [None])[0] or []
+        states = [activation(stat_name_area, line, i, len(lines)) for i, line in enumerate(lines)]
+        return format_relic_sub_stat(name_result, val_result), states

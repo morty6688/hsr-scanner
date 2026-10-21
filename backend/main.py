@@ -12,18 +12,20 @@ from app.routers import config
 from app.routers import files
 from app.routers import rating_template
 from app.routers import state
+from app.routers import review
 
 app = FastAPI(lifespan=life_span)
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=[])
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:1420", "http://127.0.0.1:1420", "http://tauri.localhost", "tauri://localhost"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(review.router)
 app.include_router(state.router)
 app.include_router(rating_template.router)
 app.include_router(files.router)
@@ -50,20 +52,7 @@ async def disconnect(sid):
 
 @sio.event
 async def start_pipeline(sid, data):
-    config_name = data.get("config_name")
-    meta_data = get_pipeline_config(config_name)
-
-    logger.info(f"{meta_data}")
-
-    # Stop existing pipeline if running
-    existing_runner = current_runners.get(sid)
-    if existing_runner:
-        await existing_runner.handle_stop_pipeline()
-
-    # Create and start a new pipeline
-    new_runner = PipelineStateMachine(config_name, meta_data, sio, sid)
-    current_runners[sid] = new_runner
-    await new_runner.handle_run_pipeline()
+    await sio.emit('pipeline_error', {'error': '旧流水线已停用，请使用本地扫描预览'}, to=sid)
 
 
 @sio.event

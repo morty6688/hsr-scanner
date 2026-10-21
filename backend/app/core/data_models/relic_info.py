@@ -1,9 +1,10 @@
-from typing import List
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
 
 class RelicTitle(BaseModel):
+    id: Optional[str] = None
     title: str
     set_name: str
     part: str
@@ -20,3 +21,4 @@ class RelicSubStat(BaseModel):
     name: str
     number: str
     score: List[float]
+    activation: Literal["active", "pending", "unknown"] = "unknown"

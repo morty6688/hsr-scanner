@@ -52,7 +52,7 @@ class Formatter:
                     continue
 
                 for set_name in rule.set_names:
-                    if main_stat_key not in self.relic_parts[set_name]:
+                    if set_name not in self.relic_parts or main_stat_key not in self.relic_parts[set_name]:
                         continue
 
                     chinese_valuable_mains = [RELIC_STATS_MAPPING[main_stat_key] for main_stat_key in valuable_mains]

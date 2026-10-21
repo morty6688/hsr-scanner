@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "source": "https://raw.githubusercontent.com/Mar-7th/StarRailRes/dbe8cdfcfb0bf657b9fe1cf92d5537f118ccb487/",
+  "source_commit": "dbe8cdfcfb0bf657b9fe1cf92d5537f118ccb487",
+  "game_version": null,
+  "client_verified": false,
+  "note": "社区数据快照，尚未与本机客户端逐项核验；不代表已支持最新版本",
+  "set_count": 62,
+  "character_count": 98,
+  "models": {
+    "https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar": "5f7217e0a89612e2f80d62f3c99a8bf5f7ae9cdc1ffd706be7dde07765627edf",
+    "https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_rec_infer.tar": "830ea228e20c2b30c4db9666066c48512f67a63f5b1a32d0d33dc9170040ce7d"
+  }
+}

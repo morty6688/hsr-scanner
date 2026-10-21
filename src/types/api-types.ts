@@ -32,12 +32,6 @@ export type UpdateRelicRuleRequest = {
     fit_characters: string[]
 }
 
-export type AssertUpdateCheckResponse = {
-    update_needed?: boolean
-    files?: string[]
-    errors?: string[]
-}
-
 export type StartPipelineRequest = {
     pipeline_name: string
     meta_data?: Record<string, string | boolean | number | undefined | null | object>

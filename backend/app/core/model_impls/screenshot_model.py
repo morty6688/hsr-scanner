@@ -15,9 +15,10 @@ class ScreenshotModel(ModelInterface[WindowInfoOutput, np.ndarray]):
         self.model = None
 
     def load(self) -> None:
-        self.model = mss()
+        pass
 
     def predict(self, input_data: WindowInfoOutput) -> np.ndarray:
         dict_data = input_data.model_dump()
-        img = self.model.grab(dict_data)
+        with mss() as capture:
+            img = capture.grab(dict_data)
         return cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)

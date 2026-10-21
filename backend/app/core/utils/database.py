@@ -1,5 +1,5 @@
 from app.constant import AUTO_DETECT_RELIC_BOX, RELIC_TITLE, RELIC_MAIN_STAT, RELIC_SUB_STAT, AUTO_DETECT_DISCARD_ICON, \
-    DISCARD_ICON_POSITION, RELIC_DISCARD_SCORE, ANALYSIS_FAIL_SKIP, AUTO_ENHANCE, RELIC_ENHANCE_SCORE
+    DISCARD_ICON_POSITION, RELIC_DISCARD_SCORE, ANALYSIS_FAIL_SKIP
 from app.core.database import db
 from app.core.orm_models.config_orm import ConfigORM
 from app.core.orm_models.rating_rule_orm import RatingRuleORM
@@ -7,6 +7,14 @@ from app.core.orm_models.rating_template_orm import RatingTemplateORM
 
 
 def init_db():
+    import os
+    import sqlite3
+    from app.constant import ASSETS_FOLDER, DATABASE_FILEPATH
+    old = os.path.join(ASSETS_FOLDER, 'database', 'scanner.db')
+    if os.path.isfile(old) and not os.path.exists(DATABASE_FILEPATH):
+        # SQLite backup handles WAL consistently and leaves the original untouched.
+        with sqlite3.connect(old) as source, sqlite3.connect(DATABASE_FILEPATH) as target:
+            source.backup(target)
     db.connect()
     db.create_tables([RatingTemplateORM, RatingRuleORM, ConfigORM], safe=True)
 
@@ -76,16 +84,6 @@ def get_pipeline_config(config_name: str):
     except ConfigORM.DoesNotExist:
         analysis_fail_skip = True
 
-    try:
-        auto_enhance = ConfigORM.get(ConfigORM.key == AUTO_ENHANCE).value
-    except ConfigORM.DoesNotExist:
-        auto_enhance = False
-
-    try:
-        relic_enhance_score = ConfigORM.get(ConfigORM.key == RELIC_ENHANCE_SCORE).value
-    except ConfigORM.DoesNotExist:
-        relic_enhance_score = 70
-
     if config_name == 'SingleRelicAnalysisPipeline':
         return {
             AUTO_DETECT_RELIC_BOX: auto_detect_relic_box,
@@ -103,6 +101,4 @@ def get_pipeline_config(config_name: str):
             AUTO_DETECT_DISCARD_ICON: auto_detect_discard_icon,
             DISCARD_ICON_POSITION: discard_icon_position,
             RELIC_DISCARD_SCORE: discard_score,
-            AUTO_ENHANCE: auto_enhance,
-            RELIC_ENHANCE_SCORE: relic_enhance_score
         }

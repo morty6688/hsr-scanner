@@ -38,34 +38,18 @@
       "csp": null
     }
   },
-  "plugins": {
-    "updater": {
-      "windows": {
-        "installMode": "passive"
-      },
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhCMDI4MjBBQkE1RkIzOUUKUldTZXMxKzZDb0lDaTdnd0J4SlFUZ0NyV2dVK3BsVWNJSW1GOENrZlZxK0pVb2VpNW5lbHkwa0kK",
-      "endpoints": [
-        "https://mumas.org/updater/latest.json"
-      ]
-    }
-  },
+  "plugins": {},
   "bundle": {
-    "active": true,
+    "active": false,
     "targets": [
       "nsis"
     ],
-    "createUpdaterArtifacts": "v1Compatible",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "resources": [
-      "../backend/app/**/*",
-      "../backend/*.py",
-      "../tools/**/*"
     ]
   }
 }

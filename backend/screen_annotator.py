@@ -41,27 +41,14 @@ class ScreenAnnotator:
 
     def find_window(self) -> bool:
         """Find and activate the target window."""
-        windows = None
-        for title in self.window_title:
-            windows = gw.getWindowsWithTitle(title)
-            if windows:
-                break
-
-        if not windows:
-            self._output({
-                "status": "error",
-                "message": f"无法找到目标窗口 ${self.window_title}"
-            })
+        from app.core.model_impls.window_info_model import WindowInfoModel
+        try:
+            model = WindowInfoModel()
+            model.load()
+            self.window_info = model.predict(None).model_dump()
+        except Exception as error:
+            self._output({'status': 'error', 'message': str(error)})
             return False
-
-        target_window = windows[0]
-
-        self.window_info = {
-            'left': int(target_window.left),
-            'top': int(target_window.top),
-            'width': int(target_window.width),
-            'height': int(target_window.height)
-        }
 
         # Validate window dimensions
         if self.window_info['width'] <= 0 or self.window_info['height'] <= 0:
@@ -260,7 +247,8 @@ def main():
         for x, y, w, h in zip(args.x, args.y, args.w, args.h):
             rectangles.append(Rectangle(x=x, y=y, w=w, h=h))
 
-    annotator = ScreenAnnotator(["Honkai: Star Rail"], args.display_only, rectangles)
+    from app.constant import GAME_TITLES
+    annotator = ScreenAnnotator(GAME_TITLES, args.display_only, rectangles)
     annotator.run()
 
 

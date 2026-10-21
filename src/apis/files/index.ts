@@ -8,6 +8,7 @@ export const useJsonFile = (filePath: string) => {
     const { backendPort } = useBackend()
     return useQuery({
         queryKey: ['json', filePath],
+        enabled: Boolean(backendPort && filePath),
         queryFn: async () => {
             if (!backendPort) {
                 throw new Error('API not initialized')
@@ -38,6 +39,7 @@ export const useImage = (imagePath: string) => {
     const { backendPort } = useBackend()
     return useQuery({
         queryKey: ['image', imagePath],
+        enabled: Boolean(backendPort && imagePath),
         queryFn: async () => {
             if (!backendPort) {
                 throw new Error('API not initialized')

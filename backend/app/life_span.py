@@ -97,6 +97,15 @@ async def life_span(app: FastAPI):
     # Init the database
     database.init_db()
 
-    yield
-
-    database.close_db()
+    from pynput.keyboard import Listener, Key
+    from app.routers.review import session
+    listener = Listener(on_press=lambda key: session.request_stop() if key == Key.esc else None)
+    listener.start()
+    try:
+        yield
+    finally:
+        session.request_stop()
+        if session.task and not session.task.done():
+            await session.task
+        listener.stop()
+        database.close_db()

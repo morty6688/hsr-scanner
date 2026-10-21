@@ -74,8 +74,6 @@
         "detection_stage",
         "ocr_stage",
         "relic_analysis_stage",
-        "relic_discard_stage",
-        "relic_enhance_stage",
         "auto_analysis_error_stage",
         "auto_complete_stage"
       ],
@@ -108,18 +106,6 @@
         {
           "trigger": "next_stage_trigger",
           "source": "relic_analysis_stage",
-          "dest": "relic_discard_stage",
-          "after": "run_current_stage"
-        },
-        {
-          "trigger": "next_stage_trigger",
-          "source": "relic_discard_stage",
-          "dest": "relic_enhance_stage",
-          "after": "run_current_stage"
-        },
-        {
-          "trigger": "next_stage_trigger",
-          "source": "relic_enhance_stage",
           "dest": "auto_complete_stage",
           "after": "run_current_stage"
         },

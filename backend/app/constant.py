@@ -24,18 +24,14 @@ PADDLE_CLS_FOLDER = os.path.join(PADDLE_FOLDER, 'cls')
 PADDLE_DET_FOLDER = os.path.join(PADDLE_FOLDER, 'det')
 PADDLE_REC_FOLDER = os.path.join(PADDLE_FOLDER, 'rec')
 
-DATABASE_FILEPATH = os.path.join(
-    ASSETS_FOLDER,
-    'database',
-    'scanner.db'
-).replace(os.sep, '/')
+LOCAL_DATA_FOLDER = os.path.abspath(os.path.join(ROOT_PATH, '..', '..', 'local-data'))
+os.makedirs(LOCAL_DATA_FOLDER, exist_ok=True)
+DATABASE_FILEPATH = os.path.join(LOCAL_DATA_FOLDER, 'scanner.db')
 
-GAME_TITLES = ['Honkai: Star Rail']
+GAME_TITLES = ['崩坏：星穹铁道', '崩坏: 星穹铁道', 'Honkai: Star Rail']
 
 RELIC_DISCARD_SCORE = 'relic_discard_score'
 AUTO_DETECT_DISCARD_ICON = 'auto_detect_discard_icon'
-RELIC_ENHANCE_SCORE = 'relic_enhance_score'
-AUTO_ENHANCE = 'auto_enhance'
 AUTO_DETECT_RELIC_BOX = 'auto_detect_relic_box'
 ANALYSIS_FAIL_SKIP = 'analysis_fail_skip'
 

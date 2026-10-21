@@ -1,3 +1,5 @@
+import ctypes
+from ctypes import wintypes
 import pygetwindow as gw
 
 from app.constant import GAME_TITLES
@@ -6,29 +8,25 @@ from app.core.data_models.model_io import WindowInfoOutput
 from app.core.interfaces.model_interface import ModelInterface
 
 
-class WindowInfoModel(ModelInterface[None, WindowInfoOutput]):
-
+class WindowInfoModel(ModelInterface):
     @staticmethod
-    def get_name() -> str:
-        return "window_info_model"
+    def get_name():
+        return 'window_info_model'
 
-    def load(self) -> None:
-        pass
+    def load(self):
+        self.hwnd = None
+        try:
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
 
     def predict(self, input_data):
-        game_window = None
-        for title in GAME_TITLES:
-            windows = gw.getWindowsWithTitle(title)
-            if windows:
-                game_window = windows[0]
-                break
-
-        if not game_window:
-            raise WindowNotFoundException(f"未检测到游戏窗口{GAME_TITLES}, 请检查游戏是否运行中, 语言是否设置为英文")
-
-        return WindowInfoOutput(
-            width=game_window.width,
-            height=game_window.height,
-            left=game_window.left,
-            top=game_window.top
-        )
+        windows = [w for title in GAME_TITLES for w in gw.getWindowsWithTitle(title) if w.title == title]
+        if len(windows) != 1 or windows[0].isMinimized:
+            raise WindowNotFoundException('请打开唯一的星铁游戏窗口，并取消最小化')
+        self.hwnd = windows[0]._hWnd
+        rect, origin = wintypes.RECT(), wintypes.POINT(0, 0)
+        user = ctypes.windll.user32
+        if not user.GetClientRect(self.hwnd, ctypes.byref(rect)) or not user.ClientToScreen(self.hwnd, ctypes.byref(origin)):
+            raise WindowNotFoundException('无法读取游戏客户区')
+        return WindowInfoOutput(width=rect.right, height=rect.bottom, left=origin.x, top=origin.y)

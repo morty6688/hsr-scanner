@@ -19,8 +19,7 @@ export function SetupProvider({ children, ...props }: SetupProviderProps) {
             show: false,
         })
         if (backendStore.appState === 'idle') {
-            invoke('post_backup').catch((e) => console.error('Failed to restore backup file:', e))
-            onOpen('install-requirement')
+            onOpen('start-backend')
         } else if (backendStore.appState === 'requirement-ready') {
             onOpen('start-backend')
         } else if (backendStore.appState === 'ready') {

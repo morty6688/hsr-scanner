@@ -1,24 +1,25 @@
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WindowEvent};
 
 static BACKEND_PROCESS_HANDLE: Mutex<Option<Child>> = Mutex::new(None);
-static REQUIREMENTS_INSTALLED: Mutex<bool> = Mutex::new(false);
 static SCREEN_ANNOTATOR_PROCESS_HANDLE: Mutex<Option<Child>> = Mutex::new(None);
 
-fn resolve_path(app: AppHandle, path: &str) -> Result<String, String> {
-    let resolved_path = app
-        .path()
-        .resolve(path, BaseDirectory::Resource)
-        .expect("failed to resolve path");
+fn resolve_path(_app: AppHandle, path: &str) -> Result<String, String> {
+    // Self-use builds run directly from this checkout; no installer resource layout.
+    let resolved_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+    if !resolved_path.is_file() && !resolved_path.is_dir() {
+        return Err(format!(
+            "Missing local file: {}. Run tools/install.ps1 first.",
+            resolved_path.display()
+        ));
+    }
 
     let path_str = resolved_path
         .into_os_string()
         .into_string()
         .expect("failed to convert path to string");
-
 
     if path_str.starts_with("\\\\?\\") {
         Ok(path_str[4..].to_string())
@@ -28,52 +29,27 @@ fn resolve_path(app: AppHandle, path: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn check_asserts_update(app: AppHandle, download: bool) -> Result<String, String> {
-    let python_path = resolve_path(app.clone(), "../tools/python/python")
-        .expect("Failed to resolve python path");
-    let main_script_path = resolve_path(app.clone(), "../backend/check_assert_update.py")
-        .expect("Failed to resolve script path");
-
-    let mut cmd = Command::new(python_path);
-    cmd.arg(&main_script_path);
-
-    if download {
-        cmd.arg("--download");
-    }
-    cmd.creation_flags(0x08000000); // This prevents the creation of a console window on Windows.
-
-    // Execute the command and capture the output
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to execute Python script: {}", e))?;
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        println!("{}", stdout);
-        Ok(stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        println!("{}", stderr);
-        Err(format!("Python script error: {}", stderr))
-    }
-}
-
-#[tauri::command]
-fn start_screen_annotator(app: AppHandle, display_only: bool, x: Vec<i32>, y: Vec<i32>, w: Vec<i32>, h: Vec<i32>) {
+fn start_screen_annotator(
+    app: AppHandle,
+    display_only: bool,
+    x: Vec<i32>,
+    y: Vec<i32>,
+    w: Vec<i32>,
+    h: Vec<i32>,
+) {
     std::thread::spawn({
         let app = app.clone();
         move || {
             let mut handle = SCREEN_ANNOTATOR_PROCESS_HANDLE.lock().unwrap();
 
             if handle.is_none() {
-                let python_path = resolve_path(app.clone(), "../tools/python/python")
+                let python_path = resolve_path(app.clone(), "../local-data/python/python.exe")
                     .expect("Failed to resolve python path");
                 let main_script_path = resolve_path(app.clone(), "../backend/screen_annotator.py")
                     .expect("Failed to resolve main script path");
 
                 let mut cmd = Command::new(python_path);
-                cmd.arg("-u")
-                    .arg(main_script_path);
+                cmd.arg("-u").arg(main_script_path);
                 if display_only {
                     cmd.arg("--display_only");
                 }
@@ -91,7 +67,6 @@ fn start_screen_annotator(app: AppHandle, display_only: bool, x: Vec<i32>, y: Ve
                     .stderr(Stdio::piped())
                     .spawn()
                     .expect("Failed to start python process");
-
 
                 let stdout = child.stdout.take().unwrap();
                 let stderr = child.stderr.take().unwrap();
@@ -139,24 +114,31 @@ fn start_screen_annotator(app: AppHandle, display_only: bool, x: Vec<i32>, y: Ve
 
                 // Spawn a thread to wait on the child’s exit
                 let exit_app = app.clone();
-                std::thread::spawn(move || {
-                    // Take the child out of the handle so we can wait on it
-                    let mut handle_monitor = SCREEN_ANNOTATOR_PROCESS_HANDLE.lock().unwrap();
-                    let child_process = handle_monitor.take();
-                    drop(handle_monitor);
-
-                    if let Some(mut child_process) = child_process {
-                        match child_process.wait() {
-                            Ok(status) => {
-                                println!("Python process exited with status: {}", status);
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to wait on Python process: {}", e);
-                            }
+                std::thread::spawn(move || loop {
+                    let exited = {
+                        let mut handle = SCREEN_ANNOTATOR_PROCESS_HANDLE.lock().unwrap();
+                        match handle.as_mut() {
+                            Some(child) => match child.try_wait() {
+                                Ok(Some(_)) => {
+                                    *handle = None;
+                                    true
+                                }
+                                Ok(None) => false,
+                                Err(_) => {
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    *handle = None;
+                                    true
+                                }
+                            },
+                            None => true,
                         }
-                        // Only after the process truly exits do we emit the "exit" event
+                    };
+                    if exited {
                         exit_app.emit("screen-annotator-exit", ()).ok();
+                        break;
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
                 });
             } else {
                 println!("Python process is already running.");
@@ -166,240 +148,55 @@ fn start_screen_annotator(app: AppHandle, display_only: bool, x: Vec<i32>, y: Ve
 }
 
 #[tauri::command]
-fn start_backend(app: AppHandle) {
-    std::thread::spawn({
-        let app = app.clone();
-        move || {
-            let mut handle = BACKEND_PROCESS_HANDLE.lock().unwrap();
-
-            if handle.is_none() {
-                let python_path = resolve_path(app.clone(), "../tools/python/python")
-                    .expect("Failed to resolve python path");
-                let main_script_path = resolve_path(app.clone(), "../backend/main.py")
-                    .expect("Failed to resolve main script path");
-
-                let mut child = Command::new(python_path)
-                    .arg(main_script_path)
-                    .creation_flags(0x08000000) // This prevents the creation of a console window on Windows.
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start python process");
-
-                let stdout = child.stdout.take().unwrap();
-                let stderr = child.stderr.take().unwrap();
-
-                // Handle stdout
-                let stdout_reader = std::io::BufReader::new(stdout);
-                // copy app handle to move into closure
-                let stdout_app = app.clone();
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader};
-                    let reader = BufReader::new(stdout_reader);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            //TODO: remove this, this is will only print to console in debug mode
-                            println!("{}", line);
-                            stdout_app
-                                .emit("backend-log", line)
-                                .expect("failed to send stdout");
-                        }
-                    }
-                });
-
-                let stderr_reader = std::io::BufReader::new(stderr);
-                // copy app handle to move into closure
-                let stderr_app = app.clone();
-                let match_port = regex::Regex::new(r"Uvicorn running on http://\S+:(\d+)").unwrap();
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader};
-                    let reader = BufReader::new(stderr_reader);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            println!("{}", line);
-                            stderr_app
-                                .emit("backend-error", line.clone())
-                                .expect("failed to send stderr");
-
-                            if let Some(captures) = match_port.captures(&line) {
-                                let port = captures.get(1).unwrap().as_str();
-                                stderr_app
-                                    .emit("backend-port", port)
-                                    .expect("failed to send stderr");
-                            }
-                        }
-                    }
-                });
-
-                *handle = Some(child);
-                println!("Python process started.");
-            } else {
-                println!("Python process is already running.");
+fn start_backend(app: AppHandle) -> Result<(), String> {
+    let python = resolve_path(app.clone(), "../local-data/python/python.exe")?;
+    let script = resolve_path(app.clone(), "../backend/main.py")?;
+    let mut handle = BACKEND_PROCESS_HANDLE.lock().map_err(|e| e.to_string())?;
+    if let Some(child) = handle.as_mut() {
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            return Ok(());
+        }
+        *handle = None;
+    }
+    let mut child = Command::new(python)
+        .arg("-u")
+        .arg(script)
+        .creation_flags(0x08000000)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Unable to start local backend: {}", e))?;
+    let stdout = child.stdout.take().ok_or("Missing stdout")?;
+    let stderr = child.stderr.take().ok_or("Missing stderr")?;
+    *handle = Some(child);
+    drop(handle);
+    let stdout_app = app.clone();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = stdout_app.emit("backend-log", line);
+        }
+    });
+    let stderr_app = app.clone();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let port_re = regex::Regex::new(r"Uvicorn running on http://\S+:(\d+)").unwrap();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = stderr_app.emit("backend-error", &line);
+            if let Some(captures) = port_re.captures(&line) {
+                let _ = stderr_app.emit("backend-port", captures.get(1).unwrap().as_str());
             }
         }
     });
-}
-
-#[tauri::command]
-fn post_backup(app: AppHandle) -> Result<String, String> {
-    let tools_dir =
-        resolve_path(app.clone(), "../tools").expect("Failed to resolve batch file directory");
-    let backup_script_path = resolve_path(app.clone(), "../tools/post_update.ps1")
-        .expect("Failed to resolve batch file path");
-
-    let output = Command::new("powershell")
-        .args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &*backup_script_path])
-        .current_dir(tools_dir)
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("Failed to execute pre_update.bat: {}", e))?;
-
-    if output.status.success() {
-        println!("Post-backup executed successfully.");
-        Ok("Post-backup executed successfully.".to_string())
-    } else {
-        println!(
-            "Post-backup failed with status: {} and stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Err(format!(
-            "Post-backup failed with status: {} and stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-#[tauri::command]
-fn pre_backup(app: AppHandle) -> Result<String, String> {
-    let tools_dir =
-        resolve_path(app.clone(), "../tools").expect("Failed to resolve batch file directory");
-    let backup_script_path = resolve_path(app.clone(), "../tools/pre_update.ps1")
-        .expect("Failed to resolve batch file path");
-
-    let output = Command::new("powershell")
-        .args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &*backup_script_path])
-        .current_dir(tools_dir)
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("Failed to execute pre_update.bat: {}", e))?;
-
-    if output.status.success() {
-        println!("Pre-backup executed successfully.");
-        Ok("Pre-backup executed successfully.".to_string())
-    } else {
-        println!(
-            "Pre-backup failed with status: {} and stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Err(format!(
-            "Pre-backup failed with status: {} and stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-#[tauri::command]
-fn install_python_requirements(app: AppHandle) {
-    std::thread::spawn({
-        let app = app.clone();
-        move || {
-            let mut installed = REQUIREMENTS_INSTALLED.lock().unwrap();
-
-            if !*installed {
-                app.emit(
-                    "requirements-status-log",
-                    "Installing Python requirements...",
-                )
-                    .expect("Failed to send install start notification");
-
-                let tools_dir = resolve_path(app.clone(), "../tools")
-                    .expect("Failed to resolve tools directory");
-                let install_ps1_path = resolve_path(app.clone(), "../tools/install.ps1")
-                    .expect("Failed to resolve powershell script path");
-
-                let mut child = Command::new("powershell")
-                    .args(&[
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        &*install_ps1_path,
-                    ])
-                    .current_dir(tools_dir)
-                    .creation_flags(0x08000000) // This prevents the creation of a console window on Windows.
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start install script");
-
-                app.emit(
-                    "requirements-status-log",
-                    "Python requirements installation started.",
-                )
-                    .expect("Failed to send installation started notification");
-
-                let stdout = child.stdout.take().unwrap();
-                let stderr = child.stderr.take().unwrap();
-
-                // Handle stdout
-                let stdout_reader = std::io::BufReader::new(stdout);
-                // copy app handle to move into closure
-                let stdout_app = app.clone();
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader};
-                    let reader = BufReader::new(stdout_reader);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            stdout_app
-                                .emit("requirements-install-log", line)
-                                .expect("failed to send stdout");
-                        }
-                    }
-                });
-
-                // copy app handle to move into closure
-                let stderr_app = app.clone();
-                let stderr_reader = std::io::BufReader::new(stderr);
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader};
-                    let reader = BufReader::new(stderr_reader);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            stderr_app
-                                .emit("requirements-install-error", line)
-                                .expect("failed to send stderr");
-                        }
-                    }
-                });
-
-                *installed = true;
-
-                // Wait for the child process to finish in the background thread
-                let status = child.wait().expect("Failed to wait on child");
-
-                if status.success() {
-                    app.emit("requirements-status-success", "success")
-                        .expect("Failed to send success notification");
-                } else {
-                    app.emit("requirements-status-failure", "failure")
-                        .expect("Failed to send failure notification");
-                }
-            } else {
-                app.emit("requirements-status-success", "redundant")
-                    .expect("Failed to send already installed notification");
-            }
-        }
-    });
+    Ok(())
 }
 
 #[tauri::command]
 fn set_window_on_top(app: AppHandle, on_top: bool) {
     let window = app.get_window("main").unwrap();
-    window.set_always_on_top(on_top).expect("Failed to set window on top");
+    window
+        .set_always_on_top(on_top)
+        .expect("Failed to set window on top");
 }
 
 #[tauri::command]
@@ -413,8 +210,12 @@ fn set_window_size(app: AppHandle, width: u32, height: u32) {
 fn kill_background_process() -> Result<(), String> {
     let mut handle = SCREEN_ANNOTATOR_PROCESS_HANDLE.lock().unwrap();
     if let Some(child) = handle.as_mut() {
-        child.kill().expect("Failed to kill the screen annotator process");
-        child.wait().expect("Failed to wait on the screen annotator process");
+        child
+            .kill()
+            .expect("Failed to kill the screen annotator process");
+        child
+            .wait()
+            .expect("Failed to wait on the screen annotator process");
         *handle = None;
         println!("Screen annotator process killed.");
     } else {
@@ -443,27 +244,26 @@ fn toggle_log_window(app: AppHandle, show: bool) {
     }
 }
 
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            #[cfg(desktop)]
-            let _ = app.handle().plugin(tauri_plugin_updater::Builder::new().build());
             let main = app.get_window("main").unwrap();
             let logs = app.get_window("logs").unwrap();
-            
+
             // hide the log window by default
             logs.hide().unwrap();
 
-            if let Some(monitor) = logs.current_monitor().unwrap(){
+            if let Some(monitor) = logs.current_monitor().unwrap() {
                 let monitor_size = monitor.size();
                 let window_size = logs.outer_size().unwrap();
 
-                let pos = PhysicalPosition::new(5, monitor_size.height as i32 - window_size.height as i32);
+                let pos = PhysicalPosition::new(
+                    5,
+                    monitor_size.height as i32 - window_size.height as i32,
+                );
                 logs.set_position(pos).unwrap();
             }
-
 
             let logs_for_main = logs.clone();
             main.on_window_event(move |event| match event {
@@ -479,16 +279,13 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            check_asserts_update,
             kill_background_process,
             start_screen_annotator,
-            post_backup,pre_backup,
             start_backend,
-            install_python_requirements,
             set_window_on_top,
             set_window_size,
-            toggle_log_window]
-        )
+            toggle_log_window
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
