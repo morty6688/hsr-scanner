@@ -58,6 +58,8 @@ class ScanSession:
         if self.busy():
             raise ValueError('已有扫描或标记任务')
         self.stop.clear()
+        if hasattr(self.adapter, 'set_scan_mode'):
+            self.adapter.set_scan_mode(True)
         if hasattr(self.adapter, 'reset_navigation'):
             self.adapter.reset_navigation()
         self.current = dict(id=str(uuid4()), status='scanning', records=[], threshold=None,
@@ -92,7 +94,6 @@ class ScanSession:
                     raise InterruptedError('已停止')
                 self.adapter.check_focus()
                 self.adapter.next()
-                await asyncio.sleep(.5)
             else:
                 self.current['message'] = '达到 3000 件上限，扫描停止。'
         except Exception as error:
@@ -127,6 +128,8 @@ class ScanSession:
         if hasattr(self.adapter, 'reset_navigation'):
             self.adapter.reset_navigation()
         self.current['status'] = 'executing'
+        if hasattr(self.adapter, 'set_scan_mode'):
+            self.adapter.set_scan_mode(False)
         self.current['counts'] = dict(success=0, skipped=0, failed=0, unexecuted=len(selected))
         self.save()
         self.task = asyncio.create_task(self.execute(selected))

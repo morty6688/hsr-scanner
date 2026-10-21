@@ -14,6 +14,10 @@ class Adapter:
         self.clicks = 0
         self.focus = True
         self.click_works = True
+        self.scan_mode = None
+
+    def set_scan_mode(self, enabled):
+        self.scan_mode = enabled
 
     def check_focus(self):
         if not self.focus:
@@ -62,11 +66,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.adapter.clicks, 0)
         self.assertTrue(self.runner.current['records'][0]['ambiguous'])
         self.assertEqual(self.runner.current['status'], 'preview')
+        self.assertTrue(self.adapter.scan_mode)
 
     async def test_successful_verified_mark(self):
         self.prepare(); self.runner.start_execute('test-session', ['0']); await self.runner.task
         self.assertEqual(self.adapter.clicks, 1)
         self.assertEqual(self.runner.current['counts']['success'], 1)
+        self.assertFalse(self.adapter.scan_mode)
 
     async def test_stopped_does_not_click(self):
         self.prepare(); self.runner.start_execute('test-session', ['0']); self.runner.request_stop()

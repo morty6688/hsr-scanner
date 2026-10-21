@@ -16,6 +16,8 @@ class RelicOCRResponse(BaseModel):
     discarded: Optional[bool] = None
     pending_unlock_cost: Optional[int] = None
     recognition_verified: bool = False
+    ocr_path: str = 'legacy'
+    ocr_device: str = 'unknown'
 
     raw_ocr: List[Any] = Field(default_factory=list)
     confidence: float = 0

@@ -2,6 +2,7 @@ import ctypes
 import asyncio
 import hashlib
 import json
+from time import perf_counter
 from uuid import uuid4
 from pathlib import Path
 import cv2
@@ -21,6 +22,8 @@ from app.core.utils.database import get_pipeline_config
 from app.core.observation_retry import DetectionIncomplete, retry_observation
 from app.constant import AUTO_DETECT_RELIC_BOX
 from app.core.grid_navigation import GridNavigation
+from app.core.panel_cache import PanelCache
+from app.core.data_models.stage_result import StageResult
 
 
 class DesktopAdapter:
@@ -28,10 +31,17 @@ class DesktopAdapter:
         self.last = None
         self.cancelled = lambda: False
         self.navigation = GridNavigation()
+        self.panel_cache = PanelCache()
+        self.scan_mode = False
+
+    def set_scan_mode(self, enabled):
+        self.scan_mode = enabled
+        self.panel_cache.clear()
 
     def reset_navigation(self):
         self.navigation.reset()
         self.last = None
+        self.panel_cache.clear()
 
     def revision(self):
         digest = hashlib.sha256()
@@ -63,7 +73,10 @@ class DesktopAdapter:
             await worker
             raise
 
-    async def _observe(self):
+    async def _observe(self, force_detection=False):
+        started = perf_counter()
+        timings = {}
+        reused = False
         self.check_focus()
         context = PipelineContext(pipeline_id='review', meta_data=get_pipeline_config('SingleRelicAnalysisPipeline'))
         manager = StageManager()
@@ -71,9 +84,37 @@ class DesktopAdapter:
             if self.cancelled():
                 raise InterruptedError('已停止')
             self.check_focus()
-            result = await manager.get_stage(stage).process(context)
+            step_started = perf_counter()
+            cached = None
+            if stage == 'detection_stage' and self.scan_mode and not force_detection and context.meta_data.get(AUTO_DETECT_RELIC_BOX, True):
+                shot = context.data['screenshot_stage']
+                cached = self.panel_cache.reuse(shot['image'], shot['window_info'].model_dump())
+            if cached is not None:
+                result = StageResult(success=True, data=cached)
+                reused = True
+            else:
+                result = await manager.get_stage(stage).process(context)
+            if (stage == 'detection_stage' and self.scan_mode and not force_detection
+                    and context.meta_data.get(AUTO_DETECT_RELIC_BOX, True) and cached is None
+                    and (not result.success or any(not (result.data or {}).get(name)
+                         for name in ('relic-title', 'relic-main-stat', 'relic-sub-stat')))):
+                shot = context.data['screenshot_stage']
+                recovered = self.panel_cache.reuse(shot['image'], shot['window_info'].model_dump(), allow_expired=True)
+                if recovered is not None:
+                    result = StageResult(success=True, data=recovered)
+                    reused = True
+                    context.data['refresh_fallback'] = True
+            timings[stage + '_ms'] = round((perf_counter() - step_started) * 1000, 2)
             if self.cancelled():
                 raise InterruptedError('已停止')
+            if stage == 'ocr_stage' and reused and (not result.success or any(
+                    getattr(result.data, key, None) is None for key in ('relic_title', 'relic_main_stat', 'relic_sub_stat'))):
+                self.panel_cache.clear()
+                fallback_ms = (perf_counter() - started) * 1000
+                relic, screenshot = await self._observe(force_detection=True)
+                relic['timings_ms']['cache_fallback_ms'] = round(fallback_ms, 2)
+                relic['timings_ms']['total_ms'] += round(fallback_ms, 2)
+                return relic, screenshot
             if not result.success:
                 raise ValueError(result.error or '识别失败')
             context.data[stage] = result.data
@@ -93,7 +134,13 @@ class DesktopAdapter:
                     raise DetectionIncomplete('遗器区域定位不完整（' + '、'.join(missing) +
                         '）。原地重试后仍失败则停止；诊断已保存至 ' + str(target.with_suffix('.json')))
         shot = context.data['screenshot_stage']
+        context.data['detection_source'] = 'cache' if reused else 'fresh'
         relic = recognize_states(shot['image'], context.data['ocr_stage'].model_dump())
+        if self.scan_mode and not reused and context.meta_data.get(AUTO_DETECT_RELIC_BOX, True) and all(
+                relic.get(key) for key in ('relic_title', 'relic_main_stat', 'relic_sub_stat')):
+            self.panel_cache.remember(shot['image'], shot['window_info'].model_dump(), context.data['detection_stage'])
+        relic['detection_source'] = context.data['detection_source']
+        relic['detection_refresh_fallback'] = context.data.get('refresh_fallback', False)
         relic['detection_confidence'] = {name: region.get('confidence')
             for name, region in context.data['detection_stage'].items()}
         if any(region.get('confidence', 1) < .8 for region in context.data['detection_stage'].values()):
@@ -104,6 +151,8 @@ class DesktopAdapter:
         ok, encoded = cv2.imencode('.png', shot['image'])
         if not ok:
             raise ValueError('无法保存截图')
+        timings['total_ms'] = round((perf_counter() - started) * 1000, 2)
+        relic['timings_ms'] = timings
         return relic, encoded.tobytes()
 
     def next(self):
@@ -116,6 +165,8 @@ class DesktopAdapter:
         self.check_focus()
         if self.last is None:
             raise ValueError('尚未核验遗器')
+        if self.scan_mode or self.last.data.get('detection_source') != 'fresh':
+            raise ValueError('标记前必须重新定位，禁止使用扫描缓存点击')
         icon = self.last.data['detection_stage'].get('discard-icon')
         if not icon:
             raise ValueError('未识别到弃置图标，禁止点击')

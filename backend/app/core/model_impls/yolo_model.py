@@ -61,6 +61,7 @@ class YOLOModel(ModelInterface[Any, Any]):
             width = int(width * window_w)
             height = int(height * window_h)
             unpadded = img_np[y1:y2, x1:x2]
+            unpadded_rect = [x1, y1, x2-x1, y2-y1]
 
             if cls == 'relic-sub-stat':
                 # Legacy detector often clips the top of the first numeric row.
@@ -77,6 +78,8 @@ class YOLOModel(ModelInterface[Any, Any]):
 
             if cls not in sub_regions:
                 sub_regions[cls] = {
+                    'crop_rect': [x1, y1, x2-x1, y2-y1],
+                    'unpadded_rect': unpadded_rect,
                     'image_unpadded': unpadded,
                     'confidence': confidence,
                     'image': sub_region_img,

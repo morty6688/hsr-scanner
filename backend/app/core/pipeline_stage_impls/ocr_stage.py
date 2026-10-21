@@ -1,4 +1,5 @@
 import re
+import os
 from typing import Optional, List, Any, Dict
 
 import cv2
@@ -18,6 +19,8 @@ from app.core.network_models.responses.relic_ocr_response import RelicOCRRespons
 from app.core.pipeline_stage_impls.detection_stage import DetectionStage
 from app.core.pipeline_stage_impls.screenshot_stage import ScreenshotStage
 from app.core.substat_activation import clean_name, activation, merge_rows
+from app.core.batch_ocr import batch_read
+from app.core.custom_exception import RelicMatchNotFoundException
 
 OCR_CONFIDENCE_THRESHOLD = 0.95
 
@@ -243,11 +246,37 @@ class OCRStage(BasePipelineStage):
                 relic_sub_stat_image = self.crop_image(img_np, relic_sub_stat_box)
 
             ocr_model.trace = []
+            if os.environ.get('HSR_OCR_BATCH', '1') != '0':
+                try:
+                    groups, name_image = batch_read(ocr_model, relic_title_image, relic_main_stat_image, relic_sub_stat_image)
+                    title_info = format_relic_title(groups[0])
+                    main_info = format_relic_main_stat(groups[1], groups[2])
+                    sub_info = format_relic_sub_stat(groups[3], groups[4])
+                    if not title_info or not main_info or not sub_info:
+                        raise ValueError('批量 OCR 格式不完整')
+                    title = relic_matcher_model.match_relic_part(title_info)
+                    main = relic_matcher_model.match_relic_main_stat(main_info['relic_main_stat'], main_info['relic_main_stat_val'])
+                    subs = relic_matcher_model.match_relic_sub_stat(sub_info)
+                    for i, sub in enumerate(subs):
+                        sub.activation = activation(name_image, groups[3][0][i], i, len(subs))
+                    ocr_model.trace = groups
+                    response = RelicOCRResponse(relic_title=title, relic_main_stat=main, relic_sub_stat=subs,
+                        ocr_path='batch', ocr_device=ocr_model.device, pending_unlock_cost=1 if any(s.activation == 'pending' for s in subs) else None,
+                        raw_ocr=groups, confidence=min(line[1][1] for group in groups for page in group for line in page))
+                    return StageResult(success=True, data=response, metadata=StageResultMetaData(send_to_frontend=True))
+                except (ValueError, RuntimeError, RelicMatchNotFoundException) as error:
+                    logger.debug(f'批量 OCR 回退完整识别: {error}')
             relic_title = None
             relic_main_stat = None
             relic_sub_stat = None
 
             relic_title_info = self.handle_relic_title_ocr(ocr_model, relic_title_image)
+            if relic_title_info not in relic_matcher_model.relic_parts:
+                # High confidence can still be wrong (e.g. 卜 -> 一). Re-read
+                # pixels instead of adding incorrect spellings to the dictionary.
+                reread = format_relic_title(ocr_model.predict(relic_title_image, force_reread=True))
+                if reread in relic_matcher_model.relic_parts:
+                    relic_title_info = reread
             if relic_title_info:
                 relic_title = safe_match(RelicMatcherInput(
                     type=RelicMatcherInputType.RELIC_TITLE,
@@ -280,6 +309,7 @@ class OCRStage(BasePipelineStage):
                     recognition_errors.append(label + '识别失败：文字置信度不足、行数不匹配或无法精确匹配本地数据')
 
             relic_ocr_response = RelicOCRResponse(
+                ocr_device=ocr_model.device,
                 relic_title=relic_title,
                 relic_main_stat=relic_main_stat,
                 relic_sub_stat=relic_sub_stat,

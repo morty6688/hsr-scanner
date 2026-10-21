@@ -2,7 +2,12 @@ from pathlib import Path
 
 from typing import Any, Optional, Union, List
 
+from app.core.ocr_runtime import configure_runtime
+
+OCR_DEVICE = configure_runtime()
 from paddleocr import PaddleOCR
+import paddle
+from loguru import logger
 import cv2
 import numpy as np
 import copy
@@ -19,6 +24,7 @@ class OCRModel(ModelInterface[Any, Union[List[Union[None, List[List], List]], Li
     def __init__(self):
         self.model: Optional[PaddleOCR] = None
         self.trace = []
+        self.device = 'cpu'
 
     def load(self) -> None:
         """Initialize OCR settings if necessary."""
@@ -28,9 +34,17 @@ class OCRModel(ModelInterface[Any, Union[List[Union[None, List[List], List]], Li
             for filename in ('inference.pdmodel', 'inference.pdiparams'):
                 if not (folder / filename).is_file():
                     raise FileNotFoundError(f'缺少本地模型: {folder / filename}；请手动运行 tools/prepare_local_assets.py')
+        available = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+        if OCR_DEVICE == 'gpu' and not available:
+            raise RuntimeError('GPU OCR 已启用，但 Paddle 无法使用 CUDA；请检查运行库，或设置 HSR_OCR_DEVICE=cpu')
+        use_gpu = OCR_DEVICE != 'cpu' and available
+        self.device = 'gpu' if use_gpu else 'cpu'
+        logger.info(f'OCR device: {self.device}; Paddle {paddle.__version__}')
         self.model = PaddleOCR(
             lang='ch',
-            use_gpu=False,
+            use_gpu=use_gpu,
+            gpu_id=0,
+            gpu_mem=512,
             enable_mkldnn=False,
             show_log=False,
             det_model_dir=str(det),
@@ -38,7 +52,7 @@ class OCRModel(ModelInterface[Any, Union[List[Union[None, List[List], List]], Li
             rec_model_dir=str(rec)
         )
 
-    def predict(self, input_data: Any) -> Union[List[Union[None, List[List], List]], List]:
+    def predict(self, input_data: Any, force_reread=False) -> Union[List[Union[None, List[List], List]], List]:
         """Perform OCR on the input data."""
         result = self.model.ocr(input_data, cls=False)
         original = copy.deepcopy(result)
@@ -47,7 +61,7 @@ class OCRModel(ModelInterface[Any, Union[List[Union[None, List[List], List]], Li
         # Keep coordinates in the original image for row/color validation.
         for page in result or []:
             for line in page or []:
-                if float(line[1][1]) >= .95:
+                if float(line[1][1]) >= .95 and not force_reread:
                     continue
                 points = np.asarray(line[0])
                 x1, y1 = np.maximum(points.min(axis=0).astype(int) - 3, 0)
