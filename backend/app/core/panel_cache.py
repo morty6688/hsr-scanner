@@ -15,6 +15,37 @@ def rectangle(box):
     return [x, y, box['width'], box['height']]
 
 
+def anchor_pixels(image, expected):
+    if min(expected.shape) <= 5:
+        return gold(image)
+    # The close button is a neutral-white X, independent of relic highlights.
+    pixels = image.astype(np.int16)
+    return (pixels.min(axis=2) >= 180) & (pixels.max(axis=2)-pixels.min(axis=2) < 45)
+
+
+def anchor_matches(actual, expected):
+    """Compare the fixed line, not changing background pixels around it."""
+    if actual.shape != expected.shape or not expected.size:
+        return False
+    if min(expected.shape) > 5:
+        count = np.count_nonzero(expected)
+        union = np.count_nonzero(actual | expected)
+        return bool(count >= 20 and union and np.count_nonzero(actual & expected)/union >= .85)
+    horizontal = expected.shape[1] >= expected.shape[0]
+    reference = expected if horizontal else expected.T
+    observed = actual if horizontal else actual.T
+    index = int(np.argmax(reference.sum(axis=1)))
+    support = reference[index]
+    if np.count_nonzero(support) < reference.shape[1] * .55:
+        return False
+    # One pixel of rasterization tolerance, never relocate the panel or update
+    # the original reference from newly observed background colors.
+    for line in observed[max(0, index-1):min(len(observed), index+2)]:
+        if np.count_nonzero(line & support) / np.count_nonzero(support) >= .85:
+            return True
+    return False
+
+
 class PanelCache:
     def __init__(self):
         self.clear()
@@ -31,13 +62,9 @@ class PanelCache:
             return
         height, width = image.shape[:2]
         title = regions['relic-title']['box']
-        main = regions['relic-main-stat']['box']
         tx, ty, tw, th = rectangle(title)
-        mx, my, mw, mh = rectangle(main)
-        # Title underline and the narrow vertical stripe left of the main stat
-        # remain fixed as the selected relic's text, icon and artwork change.
-        searches = [(tx, ty + th - th // 4, tw, max(th // 2, 12), 'horizontal'),
-                    (mx - mw // 5, my, mw // 5, mh, 'vertical')]
+        # The main-stat gold stripe is conditional game highlighting, NOT layout.
+        searches = [(tx, ty + th - th // 4, tw, max(th // 2, 12), 'horizontal')]
         for x, y, w, h, orientation in searches:
             if min(x, y) < 0 or x+w > width or y+h > height or min(w, h) < 3:
                 self.clear(); return
@@ -51,6 +78,18 @@ class PanelCache:
             else:
                 x += max(0, index-2); w = min(5, mask.shape[1] - max(0, index-2))
             self.anchors.append(([x, y, w, h], gold(image[y:y+h, x:x+w]).copy()))
+        x, y = int(width*.94), int(height*.015)
+        right, bottom = int(width*.995), int(height*.10)
+        crop = image[y:bottom, x:right]
+        mask = anchor_pixels(crop, np.zeros((6,6), dtype=bool))
+        ys, xs = np.nonzero(mask)
+        if len(xs) < 20:
+            self.clear(); return
+        bx, by = max(0, int(xs.min())-2), max(0, int(ys.min())-2)
+        ex, ey = min(crop.shape[1], int(xs.max())+3), min(crop.shape[0], int(ys.max())+3)
+        if min(ex-bx, ey-by) <= 5 or not .65 <= (ex-bx)/(ey-by) <= 1.5:
+            self.clear(); return
+        self.anchors.append(([x+bx, y+by, ex-bx, ey-by], mask[by:ey, bx:ex].copy()))
         for name in NAMES:
             region = regions[name]
             self.regions[name] = {key: region[key] for key in ('box', 'confidence', 'crop_rect', 'unpadded_rect') if key in region}
@@ -65,9 +104,8 @@ class PanelCache:
         for (x, y, w, h), expected in self.anchors:
             if x+w > width or y+h > height:
                 self.clear(); return None
-            actual = gold(image[y:y+h, x:x+w])
-            union = np.count_nonzero(actual | expected)
-            if not union or np.count_nonzero(actual & expected) / union < .85:
+            actual = anchor_pixels(image[y:y+h, x:x+w], expected)
+            if not anchor_matches(actual, expected):
                 self.clear(); return None
         result = {}
         for name, saved in self.regions.items():

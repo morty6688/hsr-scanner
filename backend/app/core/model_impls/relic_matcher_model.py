@@ -45,6 +45,7 @@ class RelicMatcherModel(ModelInterface[RelicMatcherInput, Union[RelicTitle, Reli
 
     def __init__(self, relic_sets_path: str, relic_main_stats_path: str, relic_sub_stats_path: str):
         self.relic_parts = {}
+        self.relic_sets = {}
         self.relic_main_stats = {}
         self.relic_sub_stats = {}
         self.relic_sets_path = relic_sets_path
@@ -56,6 +57,7 @@ class RelicMatcherModel(ModelInterface[RelicMatcherInput, Union[RelicTitle, Reli
             # init the relic parts
             with open(self.relic_sets_path, 'r', encoding='utf-8') as f:
                 relic_sets = json.load(f)
+                self.relic_sets = relic_sets
 
                 for relic_set_name, details in relic_sets.items():
                     # Choose the correct parts list based on whether the set is inner or outer.

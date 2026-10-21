@@ -21,6 +21,7 @@ from app.core.pipeline_stage_impls.screenshot_stage import ScreenshotStage
 from app.core.substat_activation import clean_name, activation, merge_rows
 from app.core.batch_ocr import batch_read
 from app.core.custom_exception import RelicMatchNotFoundException
+from app.core.title_identity import identify_from_labels
 
 OCR_CONFIDENCE_THRESHOLD = 0.95
 
@@ -254,13 +255,19 @@ class OCRStage(BasePipelineStage):
                     sub_info = format_relic_sub_stat(groups[3], groups[4])
                     if not title_info or not main_info or not sub_info:
                         raise ValueError('批量 OCR 格式不完整')
-                    title = relic_matcher_model.match_relic_part(title_info)
+                    title = (relic_matcher_model.match_relic_part(title_info)
+                             if title_info in relic_matcher_model.relic_parts
+                             else identify_from_labels(ocr_model, relic_matcher_model, context))
+                    if title is None:
+                        raise ValueError('标题与套装部位均未能精确确认')
                     main = relic_matcher_model.match_relic_main_stat(main_info['relic_main_stat'], main_info['relic_main_stat_val'])
                     subs = relic_matcher_model.match_relic_sub_stat(sub_info)
                     for i, sub in enumerate(subs):
                         sub.activation = activation(name_image, groups[3][0][i], i, len(subs))
                     ocr_model.trace = groups
                     response = RelicOCRResponse(relic_title=title, relic_main_stat=main, relic_sub_stat=subs,
+                        title_source='set_part' if context.data.get('title_identity_evidence') else 'title',
+                        title_identity_evidence=context.data.get('title_identity_evidence'),
                         ocr_path='batch', ocr_device=ocr_model.device, pending_unlock_cost=1 if any(s.activation == 'pending' for s in subs) else None,
                         raw_ocr=groups, confidence=min(line[1][1] for group in groups for page in group for line in page))
                     return StageResult(success=True, data=response, metadata=StageResultMetaData(send_to_frontend=True))
@@ -282,6 +289,11 @@ class OCRStage(BasePipelineStage):
                     type=RelicMatcherInputType.RELIC_TITLE,
                     data=relic_title_info,
                 ))
+
+            if relic_title is None:
+                relic_title = identify_from_labels(ocr_model, relic_matcher_model, context)
+                if relic_title is not None:
+                    recognition_errors = [e for e in recognition_errors if '遗器标题:' not in e]
 
             relic_main_stat_info = self.handle_relic_main_stat_ocr(ocr_model, relic_main_stat_image)
             if relic_main_stat_info:
@@ -309,6 +321,8 @@ class OCRStage(BasePipelineStage):
                     recognition_errors.append(label + '识别失败：文字置信度不足、行数不匹配或无法精确匹配本地数据')
 
             relic_ocr_response = RelicOCRResponse(
+                title_source='set_part' if context.data.get('title_identity_evidence') else 'title',
+                title_identity_evidence=context.data.get('title_identity_evidence'),
                 ocr_device=ocr_model.device,
                 relic_title=relic_title,
                 relic_main_stat=relic_main_stat,

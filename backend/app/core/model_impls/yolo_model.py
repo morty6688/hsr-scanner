@@ -6,6 +6,28 @@ from loguru import logger
 from ultralytics import YOLO
 
 from app.core.interfaces.model_interface import ModelInterface
+from app.core.panel_cache import gold
+
+
+def preview_main_valid(box, candidates, names, image):
+    """Weak main text boxes need independent geometry and the fixed gold stripe."""
+    x, y, w, h = map(float, box)
+    if min(w, h) <= 0:
+        return False
+    sub = next((b for b, c, p in candidates if names[int(c)] == 'relic-sub-stat' and float(p) >= .8), None)
+    title = next((b for b, c, p in candidates if names[int(c)] == 'relic-title' and float(p) >= .8), None)
+    if sub is None or title is None:
+        return False
+    sx, sy, sw, sh = map(float, sub)
+    if not (abs(sx-x) < w*.2 and .7 < sw/w < 1.3 and h < sy-y < h*5 and float(title[1]) < y-h):
+        return False
+    ih, iw = image.shape[:2]
+    left, right = int((x-w*.75)*iw), int((x-w*.5)*iw)
+    top, bottom = int((y-h*.5)*ih), int((y+h*.5)*ih)
+    if min(left, top) < 0 or right > iw or bottom > ih or right <= left or bottom <= top:
+        return False
+    mask = gold(image[top:bottom, left:right])
+    return bool(mask.sum(axis=0).max() >= mask.shape[0]*.6)
 
 
 class YOLOModel(ModelInterface[Any, Any]):
@@ -37,18 +59,33 @@ class YOLOModel(ModelInterface[Any, Any]):
         # Lower-confidence substat boxes are usable for preview only. Other
         # regions, especially the discard target, retain the original threshold.
         detection_result = self.model.predict(source=img_np, imgsz=640, conf=0.5, save=False, verbose=False)
-        boxes = detection_result[0].boxes.xywhn if len(detection_result) > 0 else []
-        classes = detection_result[0].boxes.cls if len(detection_result) > 0 else []
-        confidences = detection_result[0].boxes.conf if len(detection_result) > 0 else []
+        candidates = [(box, cls, confidence) for result in detection_result
+                      for box, cls, confidence in zip(result.boxes.xywhn, result.boxes.cls, result.boxes.conf)]
+        required = {'relic-title', 'relic-main-stat', 'relic-sub-stat'}
+        found = {self.model.names[int(cls)] for _, cls, confidence in candidates
+                 if float(confidence) >= (.5 if self.model.names[int(cls)] == 'relic-sub-stat' else .8)}
+        missing = required - found
+        # First-item bootstrap has no cache to fall back to. Retry only missing
+        # text regions at higher resolution; never replace established boxes or
+        # use this preview-only recovery for the discard click target.
+        if missing and input_data.get('allow_multiscale', False):
+            recovered = self.model.predict(source=img_np, imgsz=1280, conf=.5, save=False, verbose=False)
+            candidates += [(box, cls, confidence) for result in recovered
+                           for box, cls, confidence in zip(result.boxes.xywhn, result.boxes.cls, result.boxes.conf)
+                           if self.model.names[int(cls)] in missing]
 
         sub_regions = {}
+        strong_main = any(self.model.names[int(c)] == 'relic-main-stat' and float(p) >= .8 for _, c, p in candidates)
 
-        for box, cls, confidence in zip(boxes, classes, confidences):
+        for box, cls, confidence in candidates:
             x_center, y_center, width, height = box[:4]
             cls = self.model.names[int(cls)]
             confidence = float(confidence)
             if confidence < (0.5 if cls == 'relic-sub-stat' else 0.8):
-                continue
+                if not (input_data.get('allow_multiscale', False) and cls == 'relic-main-stat'
+                        and not strong_main and confidence >= .65
+                        and preview_main_valid(box, candidates, self.model.names, img_np)):
+                    continue
 
             # Transform image using original dimensions
             x1 = int((x_center - width / 2) * window_w)
@@ -62,6 +99,16 @@ class YOLOModel(ModelInterface[Any, Any]):
             height = int(height * window_h)
             unpadded = img_np[y1:y2, x1:x2]
             unpadded_rect = [x1, y1, x2-x1, y2-y1]
+
+            if cls == 'relic-main-stat' and cls in missing and input_data.get('allow_multiscale', False):
+                # The higher-resolution legacy box may stop before the percent
+                # sign. Preserve a small margin instead of guessing a missing %.
+                x1 = max(0, x1 - round(width * .04))
+                x2 = min(window_w, x2 + round(width * .08))
+                y1 = max(0, y1 - round(height * .15))
+                y2 = min(window_h, y2 + round(height * .15))
+                x_center, y_center = (x1+x2)//2, (y1+y2)//2
+                width, height = x2-x1, y2-y1
 
             if cls == 'relic-sub-stat':
                 # Legacy detector often clips the top of the first numeric row.

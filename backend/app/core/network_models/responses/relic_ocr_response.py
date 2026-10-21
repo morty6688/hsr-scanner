@@ -18,6 +18,8 @@ class RelicOCRResponse(BaseModel):
     recognition_verified: bool = False
     ocr_path: str = 'legacy'
     ocr_device: str = 'unknown'
+    title_source: str = 'title'
+    title_identity_evidence: Optional[Any] = None
 
     raw_ocr: List[Any] = Field(default_factory=list)
     confidence: float = 0

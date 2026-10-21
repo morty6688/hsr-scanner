@@ -72,11 +72,12 @@ export default function Home() {
         <Button disabled={busy || session?.status !== 'preview' || !selected.length} onClick={() => action('execute', { session_id: session!.id, selected })}>
             确认标记所选 {selected.length} 件（3 秒后开始）
         </Button>
-        {session?.records.map(record => <article key={record.id} className="border rounded p-3 flex gap-4">
+        {session?.status === 'scanning' && <p>扫描期间显示最近 20 件，结束后显示完整清单。</p>}
+        {(session?.status === 'scanning' ? session.records.slice(-20) : session?.records)?.map(record => <article key={record.id} className="border rounded p-3 flex gap-4">
             <input aria-label={`选择遗器 ${Number(record.id) + 1}`} type="checkbox" checked={selected.includes(record.id)}
                 disabled={busy || record.ambiguous || record.execution !== 'pending' || record.assessment.decision !== 'discard'}
                 onChange={e => setSelected(ids => e.target.checked ? [...ids, record.id] : ids.filter(id => id !== record.id))} />
-            <a href={`${base}/review/image/${record.screenshot}`} target="_blank" rel="noreferrer"><img className="w-40" alt="扫描截图" src={`${base}/review/image/${record.screenshot}`} /></a>
+            <a href={`${base}/review/image/${record.screenshot}`} target="_blank" rel="noreferrer"><img className="w-40" loading="lazy" decoding="async" alt="扫描截图" src={`${base}/review/image/${record.screenshot}?thumbnail=true`} /></a>
             <div className="flex flex-col gap-1">
                 <b>{titleFor(record.relic.relic_title)} · {labels[record.assessment.decision]}</b>
                 <span>{record.relic.relic_main_stat?.name} {record.relic.relic_main_stat?.number} · +{record.relic.relic_main_stat?.level}</span>

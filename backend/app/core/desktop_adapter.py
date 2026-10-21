@@ -24,6 +24,8 @@ from app.constant import AUTO_DETECT_RELIC_BOX
 from app.core.grid_navigation import GridNavigation
 from app.core.panel_cache import PanelCache
 from app.core.data_models.stage_result import StageResult
+from app.core.data_models.model_io import WindowInfoOutput
+from app.core.scan_capture import ScanCapture, run_native, PanelLayoutMismatch
 
 
 class DesktopAdapter:
@@ -62,9 +64,9 @@ class DesktopAdapter:
     async def observe(self):
         return await retry_observation(self._observe_worker, self.check_focus, self.cancelled)
 
-    async def _observe_worker(self):
+    async def _observe_worker(self, shot=None):
         # OCR must not block HTTP stop requests on the server event loop.
-        worker = asyncio.create_task(asyncio.to_thread(lambda: asyncio.run(self._observe())))
+        worker = asyncio.create_task(asyncio.to_thread(lambda: asyncio.run(self._observe(shot=shot))))
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
@@ -73,7 +75,8 @@ class DesktopAdapter:
             await worker
             raise
 
-    async def _observe(self, force_detection=False):
+    async def _observe(self, force_detection=False, shot=None):
+        input_shot = shot
         started = perf_counter()
         timings = {}
         reused = False
@@ -86,15 +89,19 @@ class DesktopAdapter:
             self.check_focus()
             step_started = perf_counter()
             cached = None
+            if stage == 'detection_stage':
+                context.data['screenshot_stage']['allow_multiscale'] = self.scan_mode
             if stage == 'detection_stage' and self.scan_mode and not force_detection and context.meta_data.get(AUTO_DETECT_RELIC_BOX, True):
                 shot = context.data['screenshot_stage']
                 cached = self.panel_cache.reuse(shot['image'], shot['window_info'].model_dump())
-            if cached is not None:
+            if stage == 'screenshot_stage' and input_shot is not None:
+                result = StageResult(success=True, data=input_shot)
+            elif cached is not None:
                 result = StageResult(success=True, data=cached)
                 reused = True
             else:
                 result = await manager.get_stage(stage).process(context)
-            if (stage == 'detection_stage' and self.scan_mode and not force_detection
+            if (stage == 'detection_stage' and self.scan_mode
                     and context.meta_data.get(AUTO_DETECT_RELIC_BOX, True) and cached is None
                     and (not result.success or any(not (result.data or {}).get(name)
                          for name in ('relic-title', 'relic-main-stat', 'relic-sub-stat')))):
@@ -107,11 +114,12 @@ class DesktopAdapter:
             timings[stage + '_ms'] = round((perf_counter() - step_started) * 1000, 2)
             if self.cancelled():
                 raise InterruptedError('已停止')
-            if stage == 'ocr_stage' and reused and (not result.success or any(
+            if stage == 'ocr_stage' and reused and not force_detection and (not result.success or any(
                     getattr(result.data, key, None) is None for key in ('relic_title', 'relic_main_stat', 'relic_sub_stat'))):
-                self.panel_cache.clear()
+                # OCR uncertainty is not evidence that geometry moved. Keep the
+                # cache so a failed refresh can revalidate anchors on this frame.
                 fallback_ms = (perf_counter() - started) * 1000
-                relic, screenshot = await self._observe(force_detection=True)
+                relic, screenshot = await self._observe(force_detection=True, shot=input_shot)
                 relic['timings_ms']['cache_fallback_ms'] = round(fallback_ms, 2)
                 relic['timings_ms']['total_ms'] += round(fallback_ms, 2)
                 return relic, screenshot
@@ -129,6 +137,9 @@ class DesktopAdapter:
                         target.with_suffix('.png').write_bytes(encoded.tobytes())
                     target.with_suffix('.json').write_text(json.dumps({
                         'missing': missing,
+                        'force_detection': force_detection,
+                        'scan_mode': self.scan_mode,
+                        'cache_available': bool(self.panel_cache.regions),
                         'regions': {k: v['box'] for k, v in result.data.items()},
                     }, ensure_ascii=False, indent=2), encoding='utf-8')
                     raise DetectionIncomplete('遗器区域定位不完整（' + '、'.join(missing) +
@@ -148,18 +159,114 @@ class DesktopAdapter:
             relic['detection_review_required'] = True
         self.check_focus()
         self.last = context
-        ok, encoded = cv2.imencode('.png', shot['image'])
-        if not ok:
-            raise ValueError('无法保存截图')
+        if self.scan_mode:
+            # Encoding belongs to the bounded persistence worker, not OCR.
+            screenshot = shot.get('preview_image', shot['image'])
+        else:
+            ok, encoded = cv2.imencode('.png', shot['image'])
+            if not ok:
+                raise ValueError('无法保存截图')
+            screenshot = encoded.tobytes()
         timings['total_ms'] = round((perf_counter() - started) * 1000, 2)
         relic['timings_ms'] = timings
-        return relic, encoded.tobytes()
+        return relic, screenshot
 
-    def next(self):
+    def prepare_capture(self):
+        if not self.scan_mode or self.last is None or not self.panel_cache.anchors:
+            return None
+        return ScanCapture(self.last, self.panel_cache, read_profile())
+
+    async def capture_next(self, capture):
         self.check_focus()
         if self.cancelled():
             raise InterruptedError('已停止')
-        pyautogui.press(self.navigation.next_key())
+        current = ModelManager().get_model(WindowInfoModel).predict(None)
+        if current.model_dump() != capture.window:
+            raise InterruptedError('窗口位置或尺寸变化，扫描停止')
+        self.next(fast=True)
+        started = perf_counter()
+        stable_since = None
+        previous = None
+        layout_failure = None
+        image = None
+        samples = []
+        while perf_counter() - started < 3:
+            if self.cancelled():
+                raise InterruptedError('已停止')
+            self.check_focus()
+            current = ModelManager().get_model(WindowInfoModel).predict(None)
+            if current.model_dump() != capture.window:
+                raise InterruptedError('窗口位置或尺寸变化，扫描停止')
+            x, y, w, h = capture.rect
+            region = WindowInfoOutput(left=current.left+x, top=current.top+y, width=w, height=h)
+            image = await run_native(lambda: ModelManager().get_model(ScreenshotModel).predict(region))
+            signature = capture.signature(image)
+            samples.append(dict(elapsed_ms=round((perf_counter()-started)*1000, 2),
+                baseline_delta=float(np.mean(np.abs(signature-getattr(capture, 'baseline', signature)))),
+                previous_delta=None if previous is None else float(np.mean(np.abs(signature-previous)))))
+            if capture.changed(signature):
+                if previous is not None and capture.similar(signature, previous):
+                    stable_since = stable_since or perf_counter()
+                    if perf_counter() - stable_since >= .05:
+                        self.check_focus()
+                        if self.cancelled():
+                            raise InterruptedError('已停止')
+                        try:
+                            shot = capture.accept(image, signature)
+                        except PanelLayoutMismatch as error:
+                            layout_failure = error
+                        else:
+                            shot['capture_ms'] = round((perf_counter()-started)*1000, 2)
+                            shot['capture_polls'] = len(samples)
+                            return shot
+                else:
+                    stable_since = None
+            else:
+                stable_since = None
+            previous = signature
+            await asyncio.sleep(.01)
+        if layout_failure is not None:
+            folder = Path(LOCAL_DATA_FOLDER) / 'diagnostics'
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / ('panel-layout-' + uuid4().hex)
+            def save_layout_failure():
+                ok, encoded = cv2.imencode('.png', image)
+                if ok:
+                    target.with_suffix('.png').write_bytes(encoded.tobytes())
+                target.with_suffix('.json').write_text(json.dumps(dict(
+                    window=capture.window, rect=capture.rect,
+                    anchors=[dict(rect=r, mask=m.tolist()) for r, m in capture.anchors]), indent=2), encoding='utf-8')
+            await run_native(save_layout_failure)
+            raise InterruptedError('面板固定标记连续校验失败，已停止；诊断已保存至 ' + str(target.with_suffix('.json')))
+        diagnostic = ''
+        if image is not None:
+            folder = Path(LOCAL_DATA_FOLDER) / 'diagnostics'
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / ('switch-timeout-' + uuid4().hex)
+            def save_switch_failure():
+                ok, encoded = cv2.imencode('.png', image)
+                if ok:
+                    target.with_suffix('.png').write_bytes(encoded.tobytes())
+                target.with_suffix('.json').write_text(json.dumps(dict(
+                    window=capture.window, rect=capture.rect, samples=samples), indent=2), encoding='utf-8')
+            await run_native(save_switch_failure)
+            diagnostic = '；诊断已保存至 ' + str(target.with_suffix('.json'))
+        raise InterruptedError('换件后文字未变化或未稳定，扫描停止；可能为相同内容、导航未移动或列表末尾' + diagnostic)
+
+    async def observe_frame(self, shot):
+        # Retrying must use this immutable frame: the UI may already be one item ahead.
+        result = await retry_observation(lambda: self._observe_worker(shot), self.check_focus, self.cancelled)
+        result[0]['timings_ms']['capture_wait_ms'] = shot.get('capture_ms', 0)
+        result[0]['timings_ms']['capture_polls'] = shot.get('capture_polls', 0)
+        return result
+
+    def next(self, fast=False):
+        self.check_focus()
+        if self.cancelled():
+            raise InterruptedError('已停止')
+        # The pipeline explicitly waits for a changed, stable panel. Avoid
+        # PyAutoGUI's additional fixed pause only on that guarded path.
+        pyautogui.press(self.navigation.next_key(), _pause=not fast)
 
     def mark(self):
         self.check_focus()

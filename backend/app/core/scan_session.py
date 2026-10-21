@@ -3,11 +3,57 @@ import asyncio
 import hashlib
 import json
 import threading
+import copy
 from pathlib import Path
 from uuid import uuid4
 
 from app.constant import LOCAL_DATA_FOLDER
 from app.core.review import evaluate, fingerprint
+from app.core.scan_stream import scan_stream
+from app.core.scan_capture import run_native
+
+
+def persist_scan(directory, snapshot, name, screenshot):
+    if not isinstance(screenshot, bytes):
+        import cv2
+        ok, encoded = cv2.imencode('.png', screenshot, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        if not ok:
+            raise ValueError('无法保存截图')
+        screenshot = encoded.tobytes()
+    (directory / name).write_bytes(screenshot)
+    target = directory / (snapshot['id'] + '.json')
+    temp = target.with_suffix('.tmp')
+    temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding='utf-8')
+    temp.replace(target)
+
+
+def persist_record(directory, session_id, record, screenshot, checkpoint=None):
+    if not isinstance(screenshot, bytes):
+        import cv2
+        ok, encoded = cv2.imencode('.png', screenshot, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        if not ok:
+            raise ValueError('无法保存截图')
+        screenshot = encoded.tobytes()
+    (directory / record['screenshot']).write_bytes(screenshot)
+    with (directory / (session_id + '.jsonl')).open('a', encoding='utf-8') as journal:
+        journal.write(json.dumps(record, ensure_ascii=False) + '\n')
+    if checkpoint is not None:
+        target = directory / (session_id + '.json')
+        temp = target.with_suffix('.tmp')
+        temp.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2), encoding='utf-8')
+        temp.replace(target)
+
+
+def public_session(current):
+    if current is None:
+        return None
+    # Polling must not repeatedly serialize rules and raw OCR coordinates.
+    result = {key: current[key] for key in ('id', 'status', 'message', 'counts')}
+    result['records'] = [dict(
+        id=r['id'], screenshot=r['screenshot'], ambiguous=r['ambiguous'], execution=r['execution'],
+        assessment=r['assessment'], relic={key:r['relic'].get(key) for key in
+            ('relic_title', 'relic_main_stat', 'relic_sub_stat')}) for r in current['records']]
+    return result
 
 
 class ScanSession:
@@ -69,12 +115,15 @@ class ScanSession:
         return self.current
 
     async def scan(self):
+        stream = None
+        saving = None
         try:
             # Allows returning focus from the desktop app to the game.
             await asyncio.sleep(3)
             seen = set()
-            for index in range(3000):
-                relic, screenshot = await self.observe()
+            stream = scan_stream(self.adapter, self.observe)
+            index = 0
+            async for relic, screenshot in stream:
                 if self.revision() != self.current['revision']:
                     raise InterruptedError('模板或识别配置变化，扫描已停止，请重新扫描')
                 key = fingerprint(relic)
@@ -86,21 +135,34 @@ class ScanSession:
                     break
                 seen.add(key)
                 name = f"{self.current['id']}-{index}.png"
-                (self.directory / name).write_bytes(screenshot)
                 self.current['records'].append(dict(id=str(index), fingerprint=key, relic=relic,
                     screenshot=name, assessment=self.assess(relic), ambiguous=False, execution='pending'))
-                self.save()
+                # At most one write in flight. Never mutate a worker's snapshot.
+                if saving is not None:
+                    await saving
+                record = copy.deepcopy(self.current['records'][-1])
+                checkpoint = copy.deepcopy(self.current) if (index+1) % 50 == 0 else None
+                session_id = self.current['id']
+                saving = asyncio.create_task(run_native(
+                    lambda record=record, checkpoint=checkpoint, screenshot=screenshot:
+                        persist_record(self.directory, session_id, record, screenshot, checkpoint)))
                 if self.stop.is_set():
                     raise InterruptedError('已停止')
-                self.adapter.check_focus()
-                self.adapter.next()
+                index += 1
             else:
                 self.current['message'] = '达到 3000 件上限，扫描停止。'
         except Exception as error:
             self.current['message'] = str(error)
         finally:
+            if stream is not None:
+                await stream.aclose()
+            if saving is not None:
+                try:
+                    await saving
+                except Exception as error:
+                    self.current['message'] = '保存扫描记录失败：' + str(error)
             self.current['status'] = 'preview'
-            self.save()
+            await run_native(self.save)
 
     def reprice(self, threshold):
         if self.busy() or not self.current:

@@ -10,7 +10,7 @@ from app.core.managers.global_state_manager import GlobalStateManager
 from app.core.orm_models.rating_template_orm import RatingTemplateORM
 from app.core.orm_models.rating_rule_orm import RatingRuleORM
 from app.core.utils.formatter import Formatter
-from app.core.scan_session import ScanSession
+from app.core.scan_session import ScanSession, public_session
 
 router = APIRouter(prefix='/review', tags=['Local review'])
 
@@ -37,7 +37,7 @@ class Execute(BaseModel):
 
 @router.get('')
 def status():
-    return session.current
+    return public_session(session.current)
 
 
 @router.post('/scan')
@@ -71,7 +71,13 @@ async def execute(request: Execute):
 
 
 @router.get('/image/{name}')
-def image(name: str):
+def image(name: str, thumbnail: bool = False):
     if not session.current or name not in {r['screenshot'] for r in session.current['records']}:
         raise HTTPException(404)
-    return FileResponse(session.directory / name, media_type='image/png')
+    original = session.directory / name
+    if thumbnail:
+        from app.core.preview_image import thumbnail_file
+        if not original.is_file():
+            raise HTTPException(404)
+        return FileResponse(thumbnail_file(original), media_type='image/jpeg')
+    return FileResponse(original, media_type='image/png')
