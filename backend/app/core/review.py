@@ -47,6 +47,9 @@ def score_rule(relic, rule):
 
 def evaluate(relic, rules, threshold=None):
     result = dict(decision='review', reasons=[], scores=[], algorithm_version=ALGORITHM_VERSION)
+    if relic.get('state_conflict'):
+        result['reasons'] = ['锁定与弃置状态识别冲突，请人工确认']
+        return result
     if relic.get('detection_review_required'):
         result['reasons'] = ['属性区域定位置信度偏低，仅供预览，请人工确认']
         return result

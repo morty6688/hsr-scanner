@@ -7,12 +7,14 @@ import { useModal } from '@/hooks/use-modal'
 import { getBackendUrl } from '@/lib/utils'
 import { toast } from 'sonner'
 import { useJsonFile } from '@/apis/files'
+import StateCalibration from '@/components/state-calibration'
 
 type Score = { current_confirmed: boolean; score: number; potential: number; characters: string[] }
 type RecordItem = {
     id: string; screenshot: string; ambiguous: boolean; execution: string
     relic: { relic_title?: { title: string; set_name?: string; part?: string }; relic_main_stat?: { name: string; number: string; level: number };
-        relic_sub_stat?: { name: string; number: string; activation: string }[] }
+        relic_sub_stat?: { name: string; number: string; activation: string }[];
+        rarity_source?: string; rarity?: number | null; locked?: boolean | null; equipped?: boolean | null; discarded?: boolean | null; recognition_verified?: boolean }
     assessment: { decision: 'keep' | 'discard' | 'review'; reasons: string[]; scores: Score[] }
 }
 type Session = { id: string; status: string; message: string; records: RecordItem[]; counts: Record<string, number> }
@@ -31,8 +33,9 @@ export default function Home() {
     const [threshold, setThreshold] = useState('')
     const [selected, setSelected] = useState<string[]>([])
     const [pending, setPending] = useState(false)
+    const [calibrating, setCalibrating] = useState(false)
     const base = backendPort ? getBackendUrl(backendPort) : ''
-    const busy = pending || session?.status === 'scanning' || session?.status === 'executing'
+    const busy = pending || calibrating || session?.status === 'scanning' || session?.status === 'executing'
     useEffect(() => {
         if (!base) return
         let alive = true
@@ -60,7 +63,8 @@ export default function Home() {
             <Button disabled={!base || busy} onClick={() => action('scan')}>开始扫描（不标记）</Button>
             <Button variant="destructive" disabled={!base} onClick={() => action('stop')}>停止 / 暂停</Button>
         </div>
-        <p>四条可见不等于四条生效。未校准生效、锁定、装备和弃置状态时，只生成待确认结果。</p>
+        <p>词条生效状态自动识别；本机校准仅用于锁定、装备和弃置。识别不确定的遗器不自动标记。</p>
+        <StateCalibration base={base} busy={busy} onBusy={setCalibrating} />
         <div className="flex gap-2 items-center">
             <Input className="w-32" type="number" min="1" max="100" placeholder="保留阈值 %" value={threshold} onChange={e => setThreshold(e.target.value)} />
             <Button disabled={busy || !session || !(Number(threshold) > 0 && Number(threshold) <= 100)} onClick={() => action('reprice', { threshold: Number(threshold) / 100 })}>按当前模板重新评分</Button>
@@ -80,6 +84,7 @@ export default function Home() {
             <a href={`${base}/review/image/${record.screenshot}`} target="_blank" rel="noreferrer"><img className="w-40" loading="lazy" decoding="async" alt="扫描截图" src={`${base}/review/image/${record.screenshot}?thumbnail=true`} /></a>
             <div className="flex flex-col gap-1">
                 <b>{titleFor(record.relic.relic_title)} · {labels[record.assessment.decision]}</b>
+                <span>{record.relic.rarity_source === 'user_assumed' ? '按五星处理（用户设定）' : record.relic.rarity ? `${record.relic.rarity} 星` : '星级未知'} · {(['locked', 'equipped', 'discarded'] as const).map(k => `${{ locked: '锁定', equipped: '装备', discarded: '弃置' }[k]}：${record.relic[k] === true ? '是' : record.relic[k] === false ? '否' : '未知'}`).join(' · ')} · {record.relic.recognition_verified ? '本机状态已验证' : '本机状态待验证'}</span>
                 <span>{record.relic.relic_main_stat?.name} {record.relic.relic_main_stat?.number} · +{record.relic.relic_main_stat?.level}</span>
                 {record.relic.relic_sub_stat?.map(s => <span key={s.name}>{s.name} {s.number} · {{ active: '已生效', pending: '待解锁', unknown: '生效状态未知' }[s.activation] ?? '未知'}</span>)}
                 <span>{record.assessment.reasons.join('；')}</span>

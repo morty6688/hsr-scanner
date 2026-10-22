@@ -52,7 +52,8 @@ def public_session(current):
     result['records'] = [dict(
         id=r['id'], screenshot=r['screenshot'], ambiguous=r['ambiguous'], execution=r['execution'],
         assessment=r['assessment'], relic={key:r['relic'].get(key) for key in
-            ('relic_title', 'relic_main_stat', 'relic_sub_stat')}) for r in current['records']]
+            ('relic_title', 'relic_main_stat', 'relic_sub_stat', 'rarity', 'locked', 'equipped', 'discarded',
+             'recognition_verified', 'state_evidence', 'rarity_source')}) for r in current['records']]
     return result
 
 

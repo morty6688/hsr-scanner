@@ -1,4 +1,5 @@
 from pathlib import Path
+import asyncio
 from typing import List
 
 from fastapi import APIRouter, HTTPException
@@ -24,6 +25,8 @@ def current_rules():
 
 
 session = ScanSession(DesktopAdapter(), current_rules)
+from app.core.state_calibration import StateCalibration
+calibration = StateCalibration()
 
 
 class Threshold(BaseModel):
@@ -33,6 +36,81 @@ class Threshold(BaseModel):
 class Execute(BaseModel):
     session_id: str
     selected: List[str]
+
+
+class StateTemplate(BaseModel):
+    sample_id: str
+    field: str
+    value: str
+    rect: List[int] = Field(min_length=4, max_length=4)
+    mode: str = 'color'
+
+
+class StateValidation(BaseModel):
+    sample_id: str
+    expected: dict[str, str]
+
+
+def calibration_edit(function):
+    if session.busy():
+        raise HTTPException(409, '请先停止扫描或标记')
+    try:
+        return function()
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+
+
+@router.get('/calibration')
+def calibration_status():
+    return calibration.profile()
+
+
+@router.post('/calibration/capture')
+async def calibration_capture():
+    if session.busy():
+        raise HTTPException(409, '请先停止扫描或标记')
+    session.stop.clear()
+    async def capture():
+        await asyncio.sleep(3)
+        adapter = DesktopAdapter()
+        adapter.set_scan_mode(True)
+        adapter.cancelled = session.stop.is_set
+        relic, screenshot = await adapter.observe()
+        return calibration.capture(relic, screenshot)
+    session.task = asyncio.create_task(capture())
+    try:
+        return await asyncio.shield(session.task)
+    except (ValueError, InterruptedError) as error:
+        raise HTTPException(400, str(error))
+
+
+@router.get('/calibration/image/{sample_id}')
+def calibration_image(sample_id: str):
+    try:
+        calibration.sample(sample_id)
+    except ValueError as error:
+        raise HTTPException(404, str(error))
+    return FileResponse(calibration.directory / (sample_id + '.png'))
+
+
+@router.post('/calibration/template')
+async def calibration_template(request: StateTemplate):
+    return calibration_edit(lambda: calibration.add_template(**request.model_dump()))
+
+
+@router.post('/calibration/reset/{field}')
+async def calibration_reset(field: str):
+    return calibration_edit(lambda: calibration.reset(field))
+
+
+@router.post('/calibration/validate')
+async def calibration_validate(request: StateValidation):
+    return calibration_edit(lambda: calibration.validate(request.sample_id, request.expected))
+
+
+@router.post('/calibration/finish')
+async def calibration_finish():
+    return calibration_edit(calibration.finish)
 
 
 @router.get('')

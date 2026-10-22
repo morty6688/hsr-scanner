@@ -34,7 +34,7 @@ class ScanCapture:
         self.anchors = copy.deepcopy(cache.anchors)
         rects = self.text_rects + [r for r, _ in self.anchors]
         rects += [r['rect'] for r in profile.get('activation', []) if 'rect' in r]
-        rects += [profile[k]['rect'] for k in ('locked', 'equipped', 'discarded', 'rarity')
+        rects += [profile[k]['rect'] for k in ('locked', 'equipped', 'discarded')
                   if k in profile and 'rect' in profile[k]]
         # Keep the entire panel height (artwork, level, statuses), including the
         # calibrated regions. Full-size canvas preserves all existing coordinates.
@@ -63,7 +63,9 @@ class ScanCapture:
         return float(np.mean(np.abs(a-b))) < .5
 
     def changed(self, signature):
-        return not self.similar(signature, self.baseline)
+        # A small substat change must not be diluted by an identical title/main.
+        differences = np.abs(signature-self.baseline).reshape(3, 32, 160)
+        return bool(np.max(np.mean(differences, axis=(1, 2))) >= .5)
 
     def accept(self, image, signature):
         left, top, width, height = self.rect

@@ -115,7 +115,9 @@ class DesktopAdapter:
             if self.cancelled():
                 raise InterruptedError('已停止')
             if stage == 'ocr_stage' and reused and not force_detection and (not result.success or any(
-                    getattr(result.data, key, None) is None for key in ('relic_title', 'relic_main_stat', 'relic_sub_stat'))):
+                    getattr(result.data, key, None) is None for key in ('relic_main_stat', 'relic_sub_stat'))):
+                # A title-only dictionary miss is not a geometry failure. OCR has
+                # already tried title recovery; preserve unknown without running YOLO again.
                 # OCR uncertainty is not evidence that geometry moved. Keep the
                 # cache so a failed refresh can revalidate anchors on this frame.
                 fallback_ms = (perf_counter() - started) * 1000
@@ -248,7 +250,8 @@ class DesktopAdapter:
                 if ok:
                     target.with_suffix('.png').write_bytes(encoded.tobytes())
                 target.with_suffix('.json').write_text(json.dumps(dict(
-                    window=capture.window, rect=capture.rect, samples=samples), indent=2), encoding='utf-8')
+                    window=capture.window, rect=capture.rect,
+                    text_rects=getattr(capture, 'text_rects', []), samples=samples), indent=2), encoding='utf-8')
             await run_native(save_switch_failure)
             diagnostic = '；诊断已保存至 ' + str(target.with_suffix('.json'))
         raise InterruptedError('换件后文字未变化或未稳定，扫描停止；可能为相同内容、导航未移动或列表末尾' + diagnostic)
@@ -292,7 +295,7 @@ class DesktopAdapter:
         fresh = ModelManager().get_model(ScreenshotModel).predict(current)
         original_image = self.last.data['screenshot_stage']['image']
         rects = [r['rect'] for r in profile.get('activation', []) if 'rect' in r]
-        rects += [profile[k]['rect'] for k in ('locked', 'equipped', 'discarded', 'rarity') if k in profile]
+        rects += [profile[k]['rect'] for k in ('locked', 'equipped', 'discarded') if k in profile]
         for name in ('relic-title', 'relic-main-stat', 'relic-sub-stat'):
             region = self.last.data['detection_stage'].get(name)
             if not region:

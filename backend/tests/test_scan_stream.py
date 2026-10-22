@@ -16,6 +16,16 @@ import test_panel_cache
 
 
 class CaptureTests(unittest.TestCase):
+    def test_small_substat_change_is_not_diluted_by_unchanged_regions(self):
+        capture = object.__new__(ScanCapture)
+        capture.baseline = np.zeros((96, 160), dtype=np.int16)
+        signature = capture.baseline.copy()
+        signature[64:96, :1] = 136
+        self.assertTrue(ScanCapture.similar(signature, capture.baseline))
+        self.assertTrue(capture.changed(signature))
+        self.assertTrue(ScanCapture.similar(signature, signature.copy()))
+        self.assertFalse(capture.changed(capture.baseline.copy()))
+
     def setUp(self):
         fixture = test_panel_cache.CacheTests(); fixture.setUp()
         self.fixture = fixture

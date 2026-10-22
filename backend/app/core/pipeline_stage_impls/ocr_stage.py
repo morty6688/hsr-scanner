@@ -257,7 +257,7 @@ class OCRStage(BasePipelineStage):
                         raise ValueError('批量 OCR 格式不完整')
                     title = (relic_matcher_model.match_relic_part(title_info)
                              if title_info in relic_matcher_model.relic_parts
-                             else identify_from_labels(ocr_model, relic_matcher_model, context))
+                             else identify_from_labels(ocr_model, relic_matcher_model, context, title_info))
                     if title is None:
                         raise ValueError('标题与套装部位均未能精确确认')
                     main = relic_matcher_model.match_relic_main_stat(main_info['relic_main_stat'], main_info['relic_main_stat_val'])
@@ -291,7 +291,7 @@ class OCRStage(BasePipelineStage):
                 ))
 
             if relic_title is None:
-                relic_title = identify_from_labels(ocr_model, relic_matcher_model, context)
+                relic_title = identify_from_labels(ocr_model, relic_matcher_model, context, relic_title_info)
                 if relic_title is not None:
                     recognition_errors = [e for e in recognition_errors if '遗器标题:' not in e]
 

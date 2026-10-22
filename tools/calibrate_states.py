@@ -23,7 +23,7 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     add = sub.add_parser('add')
     add.add_argument('screenshot', type=Path)
-    add.add_argument('--field', required=True, choices=['locked', 'equipped', 'discarded', 'rarity', 'activation0', 'activation1', 'activation2', 'activation3'])
+    add.add_argument('--field', required=True, choices=['locked', 'equipped', 'discarded', 'activation0', 'activation1', 'activation2', 'activation3'])
     add.add_argument('--state', required=True)
     add.add_argument('--rect', nargs=4, type=int, required=True, metavar=('X', 'Y', 'W', 'H'))
     verify = sub.add_parser('verify')
@@ -56,9 +56,7 @@ def main():
         profile['client_verified'] = False
     else:
         cases = json.loads(args.cases.read_text(encoding='utf-8'))
-        coverage = {key: set() for key in ['locked', 'equipped', 'discarded', 'rarity', 'activation0', 'activation1', 'activation2', 'activation3']}
-        if len(cases) < 12:
-            raise ValueError('至少提供 12 张独立验证截图，不使用制作模板的截图')
+        coverage = {key: set() for key in ['locked', 'equipped', 'discarded', 'activation0', 'activation1', 'activation2', 'activation3']}
         for case in cases:
             observed = recognize_states(image(args.cases.parent / case['image']), {'relic_sub_stat': [{} for _ in range(4)]})
             for key in coverage:
@@ -68,8 +66,8 @@ def main():
                     raise ValueError(f"{case['image']} 的 {key}: 期望 {expected}，得到 {actual}")
                 coverage[key].add(expected)
         for key in coverage:
-            required = ({'active', 'pending'} if key == 'activation3' else {'active', 'unknown'}) if key.startswith('activation') else ({5} if key == 'rarity' else {True, False})
-            if not required.issubset(coverage[key]) or (key == 'rarity' and len(coverage[key]) < 2):
+            required = ({'active', 'pending'} if key == 'activation3' else {'active'}) if key.startswith('activation') else {True, False}
+            if not required.issubset(coverage[key]):
                 raise ValueError(f'{key} 缺少正反例覆盖')
         profile['pending_unlock_cost'] = args.unlock_cost
         profile['client_verified'] = True

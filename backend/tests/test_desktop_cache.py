@@ -11,7 +11,7 @@ from test_review import sample
 
 
 class DesktopCacheTests(unittest.IsolatedAsyncioTestCase):
-    async def run_observation(self, incomplete=False, scan=True, frozen=False, missing_refresh=False, persistent=False):
+    async def run_observation(self, incomplete=False, scan=True, frozen=False, missing_refresh=False, persistent=False, unknown_title=False):
         adapter = DesktopAdapter()
         adapter.set_scan_mode(scan)
         adapter.check_focus = Mock()
@@ -20,6 +20,8 @@ class DesktopCacheTests(unittest.IsolatedAsyncioTestCase):
         adapter.panel_cache = Mock()
         adapter.panel_cache.reuse.return_value = regions
         relic = sample()
+        if unknown_title:
+            relic['relic_title'] = None
         valid = SimpleNamespace(**relic, model_dump=lambda: relic.copy())
         partial = dict(relic, relic_title=None, relic_main_stat=None, relic_sub_stat=None)
         invalid = SimpleNamespace(**partial, model_dump=lambda: partial.copy())
@@ -46,6 +48,13 @@ class DesktopCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['detection_source'], 'cache')
         with self.assertRaises(ValueError):
             adapter.mark()
+
+    async def test_unknown_title_does_not_repeat_detection_or_ocr(self):
+        _, stages, data = await self.run_observation(unknown_title=True, frozen=True)
+        stages['detection_stage'].process.assert_not_awaited()
+        stages['ocr_stage'].process.assert_awaited_once()
+        self.assertIsNone(data['relic_title'])
+        self.assertNotIn('cache_fallback_ms', data['timings_ms'])
 
     async def test_incomplete_cached_ocr_reobserves_fresh(self):
         adapter, stages, data = await self.run_observation(incomplete=True)
